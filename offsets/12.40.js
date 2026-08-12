@@ -1,6 +1,4 @@
-// 12.40 -- derived from 12.00 with libkernel_web export deltas from
-// slopkit-userland/offsets/offsets.json (gpe/cle/gd +0x20 vs 12.00).
-// WebKit host-constructor candidates unchanged. Kernel .data offsets alias 12.00.
+// 12.40 -- libkernel_web exports shifted +0x20 vs 12.00 (getpid/sleep/worker_wait).
 
 // host-constructor candidates: webkitBase = nativeCtorAddr - hc
 const OFFSET_wk_host_constructor_candidates = [0x0003A888, 0x0003AAD0, 0x0003BB18];
@@ -25,7 +23,7 @@ const OFFSET_lk_sysctlbyname                   = 0x00013BB0;
 const OFFSET_lk_pthread_create                 = 0x00021150;
 const OFFSET_lk_getpid                         = 0x0001B7F0;
 const OFFSET_lk__thread_list                   = 0x00064218;
-const OFFSET_lk_worker_wait_return             = 0x0001FC71;
+const OFFSET_lk_worker_wait_return             = 0x0001FC91;
 const OFFSET_lk_sleep                          = 0x00027E90;
 const OFFSET_lk_sceKernelGetCurrentCpu         = 0x00001200;
 

