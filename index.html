@@ -79,7 +79,7 @@
   <img id="cat" src="chain/cat.jpg" alt="">
   <h1>P2JB WebKit</h1>
   <p id="buildId"></p>
-  <p class="tagline">Opens the payload manager if you're already jailbroken. Otherwise runs the full P2JB WebKit chain (~50 min). No reboot needed to reopen the menu.</p>
+  <p class="tagline">Opens the payload manager if you're already jailbroken (lite menu page — minimal memory). Otherwise runs the full P2JB WebKit chain (~50 min).</p>
   <div id="actions">
     <a id="start" class="action" href="#" tabindex="0">OPEN / JAILBREAK</a>
     <a id="menu" class="action secondary" href="#" tabindex="0">PAYLOAD MENU ONLY</a>
@@ -97,8 +97,7 @@
     document.getElementById("buildId").textContent = "Build " + B;
     start.href = "chain/p2jb.html?b=" + B
         + "&go=1&auto=1&trigger=overflow&burn=full&payload=1&sockets=48&attempts=64";
-    menu.href = "chain/p2jb.html?b=" + B
-        + "&go=1&menu=1&sockets=32&attempts=12";
+    menu.href = "chain/menu.html?b=" + B + "&go=1&attempts=12";
     var m = /PlayStation 5\/(\d+)\.(\d+)/.exec(navigator.userAgent);
     if (m) {
         status.textContent = "Detected firmware " + m[1] + "." + m[2] + ".";

@@ -166,7 +166,7 @@ function jbmark(tag, detail) {
     } catch (e) {  }
 }
 
-async function prepare(p) {
+async function prepare(p, opts = {}) {
 
     let textArea = document.createElement("textarea");
 
@@ -413,7 +413,7 @@ async function prepare(p) {
         gadgets: gadgets
     };
 
-    let chain = new worker_rop(p2);
+    let chain = new worker_rop(p2, opts.stackSize, opts.reservedStack);
 
     const JB_POISON = new int64(0xDEADBEEF, 0x00C0FFEE);
     p.write8(chain.return_value, JB_POISON);

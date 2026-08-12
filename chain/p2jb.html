@@ -263,8 +263,7 @@
     var q = "b=" + encodeURIComponent(B);
     document.getElementById("homeOpen").href = "?" + q
         + "&go=1&auto=1&trigger=overflow&burn=full&payload=1&sockets=48&attempts=64";
-    document.getElementById("homeMenu").href = "?" + q
-        + "&go=1&menu=1&sockets=32&attempts=12";
+    document.getElementById("homeMenu").href = "menu.html?" + q + "&go=1&attempts=12";
 })();
 </script>
 
@@ -659,15 +658,9 @@ async function probeAlreadyJailbroken() {
 }
 
 async function enterSenderOnlyMode(reason) {
-    senderOnly = true;
-    elfldrSpawned = true;
-    clearFailureBanners();
-    trimExploitMemory();
-    setCatResult(true);
-    stage("Already jailbroken — opening payload manager", "ok");
-    flushMark("P2JB-SENDER-ONLY", clean(reason || "detected"));
-    showPayloadMenu();
-    showVerdict(false, "Payload manager ready.\nNo reboot required.");
+    flushMark("P2JB-SENDER-REDIRECT", clean(reason || "detected"));
+    location.replace("menu.html?b=" + encodeURIComponent(BUILD())
+        + "&go=1&attempts=12");
 }
 
 function setPayloadTileState(tile, state) {
@@ -1933,6 +1926,12 @@ function lastRunText() {
 }
 
 (async function entry() {
+
+    if (ARMED && Q.get("menu") === "1") {
+        location.replace("menu.html?b=" + encodeURIComponent(BUILD())
+            + "&go=1&attempts=" + encodeURIComponent(String(cfg.attempts)));
+        return;
+    }
 
     screenLine("p2jb webkit — starting");
 
