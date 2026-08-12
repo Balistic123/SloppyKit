@@ -71,7 +71,21 @@
          border-radius: 6px; margin-bottom: 12px; white-space: pre-wrap; }
   #scr, #early { font-size: 15px; color: #6d7788; margin: 0 0 10px;
                  white-space: pre; overflow: hidden; min-height: 1.3em; }
-  #nav { display:none !important; margin: 0 0 14px; }
+  #homeActions { display:none; flex-direction:column; gap:14px;
+    width:min(360px,92vw); margin:8px auto 16px; align-items:stretch; }
+  body.idle-menu #homeActions { display:flex; }
+  #homeActions a {
+    box-sizing:border-box; display:block; padding:18px 22px; border-radius:14px;
+    border:1px solid rgba(255,255,255,.22); text-align:center; text-decoration:none;
+    font:700 22px/1.1 "Segoe UI", system-ui, sans-serif; letter-spacing:.02em; }
+  #homeActions a.primary {
+    color:#fff; background:linear-gradient(135deg,#3b8cff,#1957c8);
+    box-shadow:0 12px 30px rgba(18,79,190,.32); }
+  #homeActions a.secondary {
+    color:#eaf2ff; background:linear-gradient(135deg,#273850,#172235);
+    font-size:17px; font-weight:600; padding:14px 18px; }
+  #homeActions a:focus { outline:3px solid #ebcb8b; outline-offset:2px; }
+  #nav { display:none; margin: 0 0 14px; }
   #nav a { display: inline-block; margin: 0 12px 8px 0; padding: 10px 18px;
            background: #1b2430; border: 2px solid #3b4756; border-radius: 6px;
            color: #d8dee9; text-decoration: none; font-size: 20px; }
@@ -172,6 +186,7 @@
   #failureMessage.on { display:block; }
 
   body.loader-ready { justify-content:flex-start; overflow-y:auto; padding-top:22px; }
+  body.loader-ready #homeActions { display:none !important; }
   body.loader-ready #cat { width:112px; height:112px; margin-bottom:6px; }
   body.loader-ready #nav { display:none !important; }
   #payloadMenu { display:none; width:330px; max-width:86vw; margin:4px auto 24px; }
@@ -214,9 +229,16 @@
   <a class="payloadTile" href="#" data-name="shsrv-ps5.elf" data-key="shell"><img data-src="../ui/payload-shell-default.png" alt=""></a>
   <a class="payloadTile" href="#" data-name="websrv-ps5.elf" data-key="web"><img data-src="../ui/payload-web-default.png" alt=""></a>
 </div>
+<div id="homeActions">
+  <a class="primary" id="homeOpen"
+     href="?v=3&amp;go=1&amp;auto=1&amp;trigger=overflow&amp;burn=full&amp;payload=1"
+     tabindex="0">OPEN / JAILBREAK</a>
+  <a class="secondary" id="homeMenu"
+     href="?v=3&amp;go=1&amp;menu=1"
+     tabindex="0">PAYLOAD MENU ONLY</a>
+</div>
 <div id="nav"></div>
-<div id="arm" hidden>Open this page with <b>?go=1</b> to arm it. Nothing runs
-otherwise.</div>
+<div id="arm" hidden></div>
 <div id="wrap">
 <table>
   <thead><tr><th>#</th><th>test</th><th>st</th><th>result</th></tr></thead>
@@ -1814,17 +1836,14 @@ function lastRunText() {
     }
 
     if (!ARMED) {
-        document.getElementById("arm").hidden = false;
-        renderNav(STALLED_AT, false);
-        stage("not armed" + (STALLED_AT ? " -- last run stopped at '"
-            + STALLED_AT + "'" : ""));
-        link("?go=1&auto=1&trigger=overflow&burn=full&payload=1",
-            "START JAILBREAK", "one hot");
-        link("../index.html", "back to menu", "extra");
-        summaryEl.textContent = lastRunText();
+        document.body.classList.add("idle-menu");
+        stage("pick an option below");
+        try { document.getElementById("homeOpen").focus(); } catch (e) { }
         flushMark("P2JB-IDLE", "rev=" + REV + "-armed=0-trigger=" + cfg.trigger);
         return;
     }
+
+    document.body.classList.remove("idle-menu");
 
     renderNav("", false);
     main().catch(err => {
