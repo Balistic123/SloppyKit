@@ -282,7 +282,7 @@ document.write('<script src="main.js?b=' + encodeURIComponent(window.P2JB_BUILD 
 </script>
 <script src="syscalls.js"></script>
 
-<script type="module">import { establishPrimitive, fakeCellReleased } from "./core.js";
+<script type="module">import { establishPrimitive, fakeCellReleased, dropExploitScaffolding } from "./core.js";
 import { installWindowP, pairStatus } from "./mem.js";
 import { int64 } from "./int64.js";
 
@@ -575,7 +575,7 @@ const payloadMenuEl = document.getElementById("payloadMenu");
 const rowByKey = new Map();
 let payloadSendBusy = false;
 const PAYLOAD_PORT = 9021;
-const PAYLOAD_BUFFER_SIZE = 0x10000;
+const PAYLOAD_BUFFER_SIZE = 0x4000;
 const PAYLOAD_MAX_SIZE = 0x200000;
 let payloadSendStore = null;
 let payloadSockaddrStore = null;
@@ -603,7 +603,7 @@ function showPayloadMenu() {
 async function probeExistingElfldr() {
     if (!P || !chain)
         return false;
-    preparePayloadSender();
+    ensurePayloadSockaddr();
     const sock = await sys(SYS_SOCKET, 2, 1, 0);
     if (sock.failed || sock.s32 < 0)
         return false;
@@ -631,6 +631,8 @@ async function probeExistingElfldr() {
 async function probeAlreadyJailbroken() {
     if (!P || !chain)
         return { ready: false, reason: "no-chain" };
+    if (Q.get("menu") === "1")
+        return { ready: true, reason: "menu-skip-probe" };
     if (await probeExistingElfldr())
         return { ready: true, reason: "elfldr-9021" };
     return { ready: false, reason: "needs-kernel-chain" };
@@ -665,9 +667,7 @@ function payloadSyscallError(operation, result) {
     return new Error(operation + " failed: " + detail);
 }
 
-function preparePayloadSender() {
-    if (payloadSendStore === null)
-        payloadSendStore = mem(PAYLOAD_BUFFER_SIZE);
+function ensurePayloadSockaddr() {
     if (payloadSockaddrStore === null) {
         payloadSockaddrStore = mem(0x10);
         const addr = payloadSockaddrStore.u8;
@@ -681,6 +681,11 @@ function preparePayloadSender() {
         addr[6] = 0;
         addr[7] = 1;
     }
+    return payloadSockaddrStore;
+}
+
+function preparePayloadSender() {
+    ensurePayloadSockaddr();
     if (payloadSocketOptionStore === null) {
         payloadSocketOptionStore = mem(4);
         payloadSocketOptionStore.u8.fill(0);
@@ -691,6 +696,8 @@ function preparePayloadSender() {
         payloadSendTimeoutStore.u8.fill(0);
         payloadSendTimeoutStore.u8[0] = 15;
     }
+    if (payloadSendStore === null)
+        payloadSendStore = mem(PAYLOAD_BUFFER_SIZE);
 }
 
 async function sendPayloadToElfldr(name) {
@@ -1718,6 +1725,7 @@ async function ensureWebKitPrimitive() {
         // real typed arrays.  Keeping the obsolete fake carrier here defeats
         // core.js's release and can retain the 72 MB addrof carrier graph.
         nogcHard.carrier = null;
+        dropExploitScaffolding();
         if (typeof globalThis.gc === "function") {
             try { globalThis.gc(); } catch (e) { }
         }
@@ -1758,6 +1766,14 @@ async function ensurePrepare() {
     P = prepared.p;
     chain = prepared.chain;
     nogcHard.chain = chain;
+
+    globalThis.p = undefined;
+    try {
+        window.prepare = undefined;
+        window.worker_rop = undefined;
+    } catch (e) { }
+    trimExploitMemory();
+    await settleMemory(800);
 
     flushMark("POST-PREP", "next=assertBases");
     assertBases();

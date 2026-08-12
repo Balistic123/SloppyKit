@@ -1,7 +1,7 @@
 import { int64 } from "./int64.js";
 
 import {
-    releaseFakeCell, fakeCellReleased,
+    releaseFakeCell, fakeCellReleased, dropExploitScaffolding,
     carrierHeaderCopy, carrierHomeVector
 } from "./core.js";
 
@@ -670,6 +670,8 @@ export function promoteToRealPair(onEvent) {
             throw new Error("mem.promote: core.js did not release the fake cell");
         if (fake.assertHome() !== false)
             throw new Error("mem.promote: core.js's carrier still reports itself live");
+
+        dropExploitScaffolding();
 
         pairStatus.promoted = true;
         pairStatus.state = "pair";

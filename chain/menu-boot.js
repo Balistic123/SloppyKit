@@ -1,4 +1,5 @@
-import { establishPrimitive, fakeCellReleased } from "./core.js";
+import { establishPrimitive, fakeCellReleased, dropExploitScaffolding }
+    from "./core.js";
 import { installWindowP, pairStatus } from "./mem.js";
 import { int64 } from "./int64.js";
 
@@ -16,13 +17,16 @@ const PAYLOADS = [
     { name: "websrv-ps5.elf", label: "Web Server" }
 ];
 const PAYLOAD_PORT = 9021;
-const PAYLOAD_BUFFER_SIZE = 0x10000;
+const PAYLOAD_BUFFER_SIZE = 0x4000;
 const PAYLOAD_MAX_SIZE = 0x200000;
 
-const stageEl = document.getElementById("stage");
-const logEl = document.getElementById("log");
-const menuEl = document.getElementById("menu");
-const verdictEl = document.getElementById("verdict");
+const ui = {
+    stageEl: document.getElementById("stage"),
+    logEl: document.getElementById("log"),
+    menuEl: null,
+    verdictEl: null,
+    buildTagEl: null
+};
 
 const nogcHard = { carrier: null, p: null, chain: null };
 
@@ -36,14 +40,116 @@ let payloadSockaddrStore = null;
 let payloadSocketOptionStore = null;
 let payloadSendTimeoutStore = null;
 
+function rebindUi() {
+    ui.stageEl = document.getElementById("stage");
+    ui.logEl = document.getElementById("log");
+    ui.menuEl = document.getElementById("menu");
+    ui.verdictEl = document.getElementById("verdict");
+    ui.buildTagEl = document.getElementById("buildTag");
+}
+
 function stage(text, cls) {
-    stageEl.textContent = text;
-    stageEl.className = cls || "";
+    ui.stageEl.textContent = text;
+    ui.stageEl.className = cls || "";
 }
 
 function logLine(text) {
-    logEl.textContent += text + "\n";
-    logEl.scrollTop = logEl.scrollHeight;
+    ui.logEl.textContent += text + "\n";
+    ui.logEl.scrollTop = ui.logEl.scrollHeight;
+}
+
+async function memoryRelief(ms) {
+    if (typeof globalThis.gc === "function") {
+        for (let i = 0; i < 6; ++i) {
+            try { globalThis.gc(); } catch (e) { }
+        }
+    }
+    await new Promise(r => setTimeout(r, ms));
+    if (typeof globalThis.gc === "function") {
+        for (let i = 0; i < 3; ++i) {
+            try { globalThis.gc(); } catch (e) { }
+        }
+    }
+}
+
+function purgeDocumentShell() {
+    const savedLog = ui.logEl.textContent;
+    document.open();
+    document.write(
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        + "<title>P2JB Payload Menu</title>"
+        + "<style>"
+        + "html,body{margin:0;padding:20px;background:#0c111b;color:#c8ced8;"
+        + "font:16px/1.45 system-ui,sans-serif}"
+        + "h1{margin:0 0 4px;color:#eceff4;font-size:24px}"
+        + "#buildTag{color:#6d8aab;font-size:13px;margin-bottom:16px}"
+        + "#stage{min-height:1.4em;margin-bottom:12px;color:#9fb1c3}"
+        + "#stage.ok{color:#a3be8c}#stage.bad{color:#bf616a}"
+        + "#verdict{margin-bottom:16px;color:#d8dee9}"
+        + "#menu{display:none;flex-direction:column;gap:10px;max-width:320px}"
+        + "#menu.on{display:flex}"
+        + ".payloadBtn{padding:14px 18px;border:1px solid rgba(255,255,255,.18);"
+        + "border-radius:12px;background:linear-gradient(135deg,#273850,#172235);"
+        + "color:#eaf2ff;font:600 17px/1 system-ui,sans-serif;cursor:pointer;"
+        + "text-align:left}"
+        + "#log{margin-top:20px;max-height:30vh;overflow:auto;font:12px/1.4 monospace;"
+        + "color:#6d8aab;white-space:pre-wrap;word-break:break-word}"
+        + "</style></head><body>"
+        + "<h1>Payload Menu</h1>"
+        + "<div id=\"buildTag\"></div>"
+        + "<div id=\"stage\"></div>"
+        + "<div id=\"verdict\"></div>"
+        + "<div id=\"menu\"></div>"
+        + "<pre id=\"log\"></pre>"
+        + "</body></html>"
+    );
+    document.close();
+    rebindUi();
+    ui.buildTagEl.textContent = "Build " + BUILD() + " (menu lite)";
+    ui.logEl.textContent = savedLog + "document purged\n";
+}
+
+function loadScript(src) {
+    return new Promise((resolve, reject) => {
+        const s = document.createElement("script");
+        s.src = src;
+        s.onload = () => resolve();
+        s.onerror = () => reject(new Error("script load failed: " + src));
+        document.head.appendChild(s);
+    });
+}
+
+function waitOffsetsScript() {
+    return new Promise((resolve, reject) => {
+        const deadline = Date.now() + 15000;
+        (function poll() {
+            const s = document.querySelector('script[src^="../offsets/"]');
+            if (s) {
+                if (typeof OFFSET_wk_vtable_first_element !== "undefined")
+                    return resolve(s.src);
+                s.addEventListener("load", () => resolve(s.src));
+                s.addEventListener("error", () => reject(new Error("offsets 404: " + s.src)));
+                return;
+            }
+            if (Date.now() > deadline)
+                return reject(new Error("offsets script never injected"));
+            setTimeout(poll, 10);
+        })();
+    });
+}
+
+async function loadChainScripts() {
+    const B = encodeURIComponent(BUILD());
+    globalThis.int64 = int64;
+    logLine("phase2: rop.js");
+    await loadScript("rop.js?b=" + B);
+    window.offsetsReady = waitOffsetsScript();
+    logLine("phase2: prepare-only.js");
+    await loadScript("prepare-only.js?b=" + B);
+    logLine("phase2: syscalls.js");
+    await loadScript("syscalls.js?b=" + B);
+    await window.offsetsReady;
+    logLine("phase2: offsets fw=" + window.fw_str);
 }
 
 async function preflight() {
@@ -53,8 +159,6 @@ async function preflight() {
         throw new Error("rop.js did not evaluate");
     if (typeof SYS_GETPID === "undefined")
         throw new Error("syscalls.js did not evaluate");
-    await window.offsetsReady;
-    logLine("offsets fw=" + window.fw_str + " ready");
 }
 
 function assertInt64Identity() {
@@ -68,12 +172,9 @@ async function bootWebKit() {
         return;
     }
 
-    stage("WebKit (~1 in 3 placement, up to " + MAX_ATTEMPTS + " tries)");
+    stage("WebKit (~1 in 3, up to " + MAX_ATTEMPTS + " tries)");
     try { history.replaceState(null, ""); } catch (e) { }
-    if (typeof globalThis.gc === "function") {
-        try { globalThis.gc(); } catch (e) { }
-    }
-    await new Promise(r => setTimeout(r, 750));
+    await memoryRelief(750);
 
     const carrier = await establishPrimitive({
         maxAttempts: MAX_ATTEMPTS,
@@ -95,10 +196,26 @@ async function bootWebKit() {
     logLine("primitive up released=" + fakeCellReleased()
         + " history=" + (history.state === null));
 
-    if (typeof globalThis.gc === "function") {
-        try { globalThis.gc(); } catch (e) { }
+    dropExploitScaffolding();
+    await memoryRelief(1500);
+}
+
+async function postPreparePark() {
+    globalThis.p = undefined;
+    try {
+        window.prepare = undefined;
+        window.worker_rop = undefined;
+    } catch (e) { }
+    for (const sel of ['script[src*="rop.js"]', 'script[src*="prepare-only.js"]']) {
+        const el = document.querySelector(sel);
+        if (el) el.remove();
     }
-    await new Promise(r => setTimeout(r, 1000));
+    try {
+        const lines = ui.logEl.textContent.split("\n");
+        ui.logEl.textContent = lines.slice(-3).join("\n") + "\n";
+    } catch (e) { }
+    await memoryRelief(1000);
+    logLine("prepare() ok — parked");
 }
 
 async function bootPrepare() {
@@ -110,11 +227,15 @@ async function bootPrepare() {
 
     stage("prepare()");
     logLine("prepare() enter");
-    const prepared = await prepare(p, { menu: true });
+    const prepared = await prepare(p, {
+        menu: true,
+        stackSize: 0x28000,
+        reservedStack: 0x4000
+    });
     P = prepared.p;
     chain = prepared.chain;
     nogcHard.chain = chain;
-    logLine("prepare() ok");
+    await postPreparePark();
 }
 
 function classify(raw) {
@@ -143,9 +264,7 @@ function mem(n) {
     return { ptr, u8: ptr.backing };
 }
 
-function preparePayloadSender() {
-    if (payloadSendStore === null)
-        payloadSendStore = mem(PAYLOAD_BUFFER_SIZE);
+function ensureSockaddr() {
     if (payloadSockaddrStore === null) {
         payloadSockaddrStore = mem(0x10);
         const addr = payloadSockaddrStore.u8;
@@ -159,6 +278,11 @@ function preparePayloadSender() {
         addr[6] = 0;
         addr[7] = 1;
     }
+    return payloadSockaddrStore;
+}
+
+function preparePayloadSender() {
+    ensureSockaddr();
     if (payloadSocketOptionStore === null) {
         payloadSocketOptionStore = mem(4);
         payloadSocketOptionStore.u8.fill(0);
@@ -169,31 +293,8 @@ function preparePayloadSender() {
         payloadSendTimeoutStore.u8.fill(0);
         payloadSendTimeoutStore.u8[0] = 15;
     }
-}
-
-async function probeExistingElfldr() {
-    preparePayloadSender();
-    const sock = await sys(SYS_SOCKET, 2, 1, 0);
-    if (sock.failed || sock.s32 < 0)
-        return false;
-    const fd = sock.s32;
-    let reachable = false;
-    try {
-        const conn = await sys(SYS_CONNECT, fd, payloadSockaddrStore.ptr, 0x10);
-        reachable = !conn.failed && conn.s32 === 0;
-        if (!reachable) {
-            const sock2 = await sys(SYS_SOCKET, 2, 1, 0);
-            if (!sock2.failed && sock2.s32 >= 0) {
-                const bindRes = await sys(SYS_BIND, sock2.s32,
-                    payloadSockaddrStore.ptr, 0x10);
-                await sys(SYS_CLOSE, sock2.s32);
-                reachable = bindRes.failed || bindRes.s32 < 0;
-            }
-        }
-    } finally {
-        await sys(SYS_CLOSE, fd);
-    }
-    return reachable;
+    if (payloadSendStore === null)
+        payloadSendStore = mem(PAYLOAD_BUFFER_SIZE);
 }
 
 async function sendPayload(name) {
@@ -260,19 +361,21 @@ async function sendPayload(name) {
     }
 }
 
-function showMenu() {
-    menuEl.innerHTML = "";
-    menuEl.className = "on";
-    verdictEl.textContent = "Payload manager ready. Pick a payload below.";
+async function showMenuDeferred() {
+    await memoryRelief(400);
+    ui.menuEl.innerHTML = "";
+    ui.menuEl.className = "on";
+    ui.verdictEl.textContent =
+        "Payload manager ready. Pick a payload — sends go to 127.0.0.1:9021.";
     for (const item of PAYLOADS) {
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "payloadBtn";
         btn.textContent = item.label;
         btn.addEventListener("click", () => sendPayload(item.name));
-        menuEl.appendChild(btn);
+        ui.menuEl.appendChild(btn);
     }
-    try { menuEl.firstChild.focus(); } catch (e) { }
+    try { ui.menuEl.firstChild.focus(); } catch (e) { }
 }
 
 async function main() {
@@ -281,20 +384,19 @@ async function main() {
         return;
     }
 
-    logLine("menu boot build=" + BUILD() + " (scripts preloaded)");
+    logLine("menu boot build=" + BUILD() + " phase1=webkit-only");
 
-    await preflight();
     await bootWebKit();
+
+    purgeDocumentShell();
+    await memoryRelief(500);
+
+    await loadChainScripts();
+    await preflight();
     await bootPrepare();
 
-    stage("Checking elfldr on 127.0.0.1:9021…");
-    if (!(await probeExistingElfldr())) {
-        stage("elfldr not on 127.0.0.1:9021 — run full jailbreak first", "bad");
-        return;
-    }
-
     stage("Payload manager ready", "ok");
-    showMenu();
+    await showMenuDeferred();
 }
 
 main().catch(err => {

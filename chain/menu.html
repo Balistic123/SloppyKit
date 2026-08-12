@@ -5,41 +5,9 @@
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>P2JB Payload Menu</title>
-<style>
-  html, body {
-    margin: 0; padding: 20px;
-    background: #0c111b; color: #c8ced8;
-    font: 16px/1.45 "Segoe UI", system-ui, sans-serif;
-  }
-  h1 { margin: 0 0 4px; color: #eceff4; font-size: 24px; }
-  #buildTag { color: #6d8aab; font-size: 13px; margin-bottom: 16px; }
-  #stage { min-height: 1.4em; margin-bottom: 12px; color: #9fb1c3; }
-  #stage.ok { color: #a3be8c; }
-  #stage.bad { color: #bf616a; }
-  #verdict { margin-bottom: 16px; color: #d8dee9; }
-  #menu { display: none; flex-direction: column; gap: 10px; max-width: 320px; }
-  #menu.on { display: flex; }
-  .payloadBtn {
-    padding: 14px 18px; border: 1px solid rgba(255,255,255,.18);
-    border-radius: 12px; background: linear-gradient(135deg, #273850, #172235);
-    color: #eaf2ff; font: 600 17px/1 "Segoe UI", system-ui, sans-serif;
-    cursor: pointer; text-align: left;
-  }
-  .payloadBtn:focus { outline: 3px solid #ebcb8b; outline-offset: 2px; }
-  .payloadBtn:active { transform: translateY(1px); }
-  #log {
-    margin-top: 20px; max-height: 30vh; overflow: auto;
-    font: 12px/1.4 monospace; color: #6d8aab;
-    white-space: pre-wrap; word-break: break-word;
-  }
-</style>
 </head>
 <body>
-<h1>Payload Menu</h1>
-<div id="buildTag"></div>
 <div id="stage">idle</div>
-<div id="verdict"></div>
-<div id="menu"></div>
 <pre id="log"></pre>
 
 <script src="build.js"></script>
@@ -55,25 +23,8 @@
             "./menu-boot.js": "./menu-boot.js?b=" + B
         }
     });
-    document.getElementById("buildTag").textContent = "Build " + B + " (menu lite)";
 })();
 </script>
-<script src="rop.js"></script>
-<script>
-document.write('<script src="prepare-only.js?b='
-    + encodeURIComponent(window.P2JB_BUILD || "dev") + '"><\/script>');
-</script>
-<script>window.offsetsReady = new Promise(function (res, rej) {
-    var s = document.querySelector('script[src^="../offsets/"]');
-    if (!s) return rej(new Error("offsets script was never injected by prepare-only.js"));
-    if (typeof OFFSET_wk_vtable_first_element !== "undefined") return res(s.src);
-    s.addEventListener("load", function () { res(s.src); });
-    s.addEventListener("error", function () {
-        rej(new Error("offsets 404: " + s.src));
-    });
-});
-</script>
-<script src="syscalls.js"></script>
 <script type="module">
 import { int64 } from "./int64.js";
 globalThis.int64 = int64;
