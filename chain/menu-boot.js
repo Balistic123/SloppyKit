@@ -47,10 +47,13 @@ function logLine(text) {
 }
 
 async function settleBeforePrepare() {
+    try { logEl.textContent = logEl.textContent.split("\n").slice(-4).join("\n"); } catch (e) { }
     if (typeof globalThis.gc === "function") {
-        try { globalThis.gc(); globalThis.gc(); globalThis.gc(); } catch (e) { }
+        for (let i = 0; i < 5; ++i) {
+            try { globalThis.gc(); } catch (e) { }
+        }
     }
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise(r => setTimeout(r, 3500));
     if (typeof globalThis.gc === "function") {
         try { globalThis.gc(); } catch (e) { }
     }
@@ -78,9 +81,10 @@ function waitOffsetsReady() {
 
 async function loadChainScripts() {
     const B = encodeURIComponent(BUILD());
-    logLine("loading chain scripts after WebKit purge");
+    logLine("loading prepare-only (not full main.js)");
+    globalThis.int64 = int64;
     await loadScript("rop.js?b=" + B);
-    await loadScript("main.js?b=" + B);
+    await loadScript("prepare-only.js?b=" + B);
     window.offsetsReady = waitOffsetsReady();
     await loadScript("syscalls.js?b=" + B);
     await window.offsetsReady;
@@ -151,11 +155,7 @@ async function bootPrepare() {
 
     stage("prepare()");
     logLine("prepare() enter");
-    const prepared = await prepare(p, {
-        menu: true,
-        stackSize: 0x40000,
-        reservedStack: 0x8000
-    });
+    const prepared = await prepare(p, { menu: true });
     P = prepared.p;
     chain = prepared.chain;
     nogcHard.chain = chain;
@@ -326,7 +326,7 @@ async function main() {
         return;
     }
 
-    document.getElementById("buildTag").textContent = "Build " + BUILD() + " (menu)";
+    document.getElementById("buildTag").textContent = "Build " + BUILD() + " (menu lite)";
     logLine("menu boot build=" + BUILD());
 
     await bootWebKit();
