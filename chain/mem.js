@@ -450,11 +450,21 @@ export function promoteToRealPair(onEvent) {
         note("PAIR-BEGIN", `window=${fake.windowBytes}-vector=+${VECTOR_OFF}`
             + `-length=+${LENGTH_OFF}-mode=+${MODE_OFF}`);
 
-        const mainRecord = carrierHeaderCopy();
-        const mainHomeVector = carrierHomeVector();
+        const mainRecord = (fake.headerRecord instanceof Uint8Array
+            && fake.headerRecord.length >= PAIR_HEADER_BYTES)
+            ? fake.headerRecord
+            : carrierHeaderCopy();
+        const mainHomeVector = (typeof fake.homeVector === "number"
+            && Number.isFinite(fake.homeVector))
+            ? fake.homeVector
+            : carrierHomeVector();
+
         if (!(mainRecord instanceof Uint8Array)
             || mainRecord.length < PAIR_HEADER_BYTES)
-            throw new Error("mem.promote: core.js's carrier record is the wrong shape");
+            throw new Error("mem.promote: carrier header snapshot is missing or truncated");
+        if (typeof mainHomeVector !== "number" || !Number.isFinite(mainHomeVector))
+            throw new Error("mem.promote: carrier homeVector snapshot is missing ("
+                + mainHomeVector + ")");
 
         const recordVector = low48At(mainRecord, VECTOR_OFF);
         pairStatus.mainVector = toI64(mainHomeVector);
@@ -752,14 +762,14 @@ export function installWindowP(c, options) {
 
     try {
         promoteToRealPair(opts.onEvent);
-    } catch {
-
+    } catch (error) {
         if (pairStatus.state === "broken") {
             globalThis.p = undefined;
             throw new Error("mem: the promotion failed AND its rollback did not "
                 + "verify -- window.p has been WITHDRAWN rather than published "
                 + `mis-aimed. failedAt=${pairStatus.failedAt} ${pairStatus.error}`);
         }
+        throw error;
     }
     return prim;
 }

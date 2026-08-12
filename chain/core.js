@@ -1169,6 +1169,9 @@ function buildCarrier() {
 
     profile.cellSize = 0x20;
 
+    const headerRecord = rwHeader.slice(0, CELL_BYTES);
+    const homeVector = rwOriginalVector;
+
     return {
 
         aim(address) {
@@ -1206,6 +1209,9 @@ function buildCarrier() {
 
         hostAddress,
         fakeAddress,
+
+        headerRecord,
+        homeVector,
 
         assertHome() {
             if (liveCandidate === null || rwView === null || targetView === null

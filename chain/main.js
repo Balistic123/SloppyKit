@@ -1221,4 +1221,4 @@ async function main(userlandRW, wkOnly = false) {
 let fwScript = document.createElement('script');
 document.body.appendChild(fwScript);
 
-fwScript.setAttribute('src', `../offsets/${window.fw_offset_str}.js?v=2`);
+fwScript.setAttribute('src', `../offsets/${window.fw_offset_str}.js?b=${window.P2JB_BUILD || "dev"}`);

@@ -42,6 +42,7 @@
     align-items:center; justify-content:center; }
   h1 { font-size: 30px; margin: 0 0 2px; color: #eceff4; font-weight: 600; }
   .sub { font-size: 18px; color: #7c8795; margin: 0 0 12px; }
+  #buildTag { font-size: 14px; color: #6d8aab; letter-spacing: .05em; margin-top: -8px; }
   #stage { font-size: 24px; padding: 9px 13px; border-radius: 6px;
            margin-bottom: 12px; background: #1b2430; border-left: 8px solid #5e81ac; }
   #stage.ok  { background: #16281c; border-left-color: #47c76a; color: #b8f0c6; }
@@ -212,6 +213,7 @@
   <img id="catImage" src="cat.jpg" alt="">
 </div>
 <h1>p2jb</h1>
+<div id="buildTag"></div>
 <div class="sub">WebKit userland + cr_ref kernel (9.00–12.70)</div>
 <div id="reboot"></div>
 <div id="verdict"></div>
@@ -230,12 +232,8 @@
   <a class="payloadTile" href="#" data-name="websrv-ps5.elf" data-key="web"><img data-src="../ui/payload-web-default.png" alt=""></a>
 </div>
 <div id="homeActions">
-  <a class="primary" id="homeOpen"
-     href="?v=6&amp;go=1&amp;auto=1&amp;trigger=overflow&amp;burn=full&amp;payload=1"
-     tabindex="0">OPEN / JAILBREAK</a>
-  <a class="secondary" id="homeMenu"
-     href="?v=6&amp;go=1&amp;menu=1"
-     tabindex="0">PAYLOAD MENU ONLY</a>
+  <a class="primary" id="homeOpen" href="#" tabindex="0">OPEN / JAILBREAK</a>
+  <a class="secondary" id="homeMenu" href="#" tabindex="0">PAYLOAD MENU ONLY</a>
 </div>
 <div id="nav"></div>
 <div id="arm" hidden></div>
@@ -250,8 +248,26 @@
 
 <div id="console" hidden></div>
 
+<script src="build.js"></script>
+<script type="importmap" id="p2jb-importmap"></script>
+<script>
+(function () {
+    var B = window.P2JB_BUILD || "dev";
+    document.getElementById("p2jb-importmap").textContent = JSON.stringify({
+        imports: {
+            "./core.js": "./core.js?b=" + B,
+            "./mem.js": "./mem.js?b=" + B
+        }
+    });
+    document.getElementById("buildTag").textContent = "Build " + B;
+    var q = "b=" + encodeURIComponent(B);
+    document.getElementById("homeOpen").href = "?" + q
+        + "&go=1&auto=1&trigger=overflow&burn=full&payload=1";
+    document.getElementById("homeMenu").href = "?" + q + "&go=1&menu=1";
+    document.write('<script src="main.js?b=' + encodeURIComponent(B) + '"><\/script>');
+})();
+</script>
 <script src="rop.js"></script>
-<script src="main.js?v=3"></script>
 <script>window.offsetsReady = new Promise(function (res, rej) {
     var s = document.querySelector('script[src^="../offsets/"]');
     if (!s) return rej(new Error("offsets script was never injected by main.js"));
@@ -278,7 +294,8 @@ let kernelModulePromise = null;
 
 function loadKernelModule() {
     if (!kernelModulePromise) {
-        kernelModulePromise = import("./p2jb-kernel.js?v=2").then(lib => {
+        kernelModulePromise = import("./p2jb-kernel.js?b="
+            + (window.P2JB_BUILD || "dev")).then(lib => {
             BANNED = lib.BANNED;
             ERRNO = lib.ERRNO;
             K = lib.K;
@@ -332,6 +349,7 @@ const CORE_OVERRIDE = Q.has("core") ? parseInt(Q.get("core"), 10) : -1;
 const PROGRESS_KEY = "p2jb-webkit:next";
 const RUNLOG_KEY = "p2jb-webkit:last";
 const REV = "p2jb-webkit-1";
+const BUILD = () => window.P2JB_BUILD || "dev";
 
 function storeGet(k) {
     try { return sessionStorage.getItem(k) || ""; } catch { return ""; }
@@ -1672,6 +1690,14 @@ async function bootPrimitiveAndChain() {
                 flushQueue(false);
             }
         });
+        if (typeof carrier.homeVector !== "number"
+            || !Number.isFinite(carrier.homeVector))
+            throw new Error("webkit primitive returned a carrier without a valid "
+                + "homeVector snapshot");
+        flushMark("CARRIER-SNAPSHOT",
+            "home=0x" + Math.floor(carrier.homeVector).toString(16)
+            + "-headerBytes=" + (carrier.headerRecord
+                ? carrier.headerRecord.length : 0));
         nogcHard.carrier = carrier;
         installWindowP(carrier, { onEvent: queueEvent });
         // installWindowP() promotes the primitive to a self-contained pair of
@@ -1725,7 +1751,7 @@ async function bootPrimitiveAndChain() {
 }
 
 async function main() {
-    flushMark("P2JB-BOOT", "rev=" + REV + "-trigger=" + cfg.trigger
+    flushMark("P2JB-BOOT", "rev=" + REV + "-build=" + BUILD() + "-trigger=" + cfg.trigger
         + "-burn=" + cfg.burn + "-sockets=" + cfg.sockets
         + "-attempts=" + cfg.attempts + "-from=" + (FROM || "none")
         + "-only=" + (ONLY.join(".") || "none")
@@ -1877,7 +1903,7 @@ function lastRunText() {
         document.body.classList.add("idle-menu");
         stage("pick an option below");
         try { document.getElementById("homeOpen").focus(); } catch (e) { }
-        flushMark("P2JB-IDLE", "rev=" + REV + "-armed=0-trigger=" + cfg.trigger);
+        flushMark("P2JB-IDLE", "rev=" + REV + "-build=" + BUILD() + "-armed=0-trigger=" + cfg.trigger);
         return;
     }
 
