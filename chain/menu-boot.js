@@ -46,58 +46,15 @@ function logLine(text) {
     logEl.scrollTop = logEl.scrollHeight;
 }
 
-async function settleBeforePrepare() {
-    try { logEl.textContent = logEl.textContent.split("\n").slice(-4).join("\n"); } catch (e) { }
-    if (typeof globalThis.gc === "function") {
-        for (let i = 0; i < 5; ++i) {
-            try { globalThis.gc(); } catch (e) { }
-        }
-    }
-    await new Promise(r => setTimeout(r, 3500));
-    if (typeof globalThis.gc === "function") {
-        try { globalThis.gc(); } catch (e) { }
-    }
-}
-
-function loadScript(src) {
-    return new Promise((resolve, reject) => {
-        const s = document.createElement("script");
-        s.src = src;
-        s.onload = () => resolve();
-        s.onerror = () => reject(new Error("script load failed: " + src));
-        document.head.appendChild(s);
-    });
-}
-
-function waitOffsetsReady() {
-    return new Promise((resolve, reject) => {
-        const s = document.querySelector('script[src^="../offsets/"]');
-        if (!s) return reject(new Error("offsets script missing"));
-        if (typeof OFFSET_wk_vtable_first_element !== "undefined") return resolve(s.src);
-        s.addEventListener("load", () => resolve(s.src));
-        s.addEventListener("error", () => reject(new Error("offsets 404: " + s.src)));
-    });
-}
-
-async function loadChainScripts() {
-    const B = encodeURIComponent(BUILD());
-    logLine("loading prepare-only (not full main.js)");
-    globalThis.int64 = int64;
-    await loadScript("rop.js?b=" + B);
-    await loadScript("prepare-only.js?b=" + B);
-    window.offsetsReady = waitOffsetsReady();
-    await loadScript("syscalls.js?b=" + B);
-    await window.offsetsReady;
-}
-
 async function preflight() {
     if (typeof prepare !== "function")
-        throw new Error("main.js did not evaluate");
+        throw new Error("prepare-only.js did not evaluate");
     if (typeof worker_rop !== "function")
         throw new Error("rop.js did not evaluate");
     if (typeof SYS_GETPID === "undefined")
         throw new Error("syscalls.js did not evaluate");
-    logLine("offsets fw=" + window.fw_str);
+    await window.offsetsReady;
+    logLine("offsets fw=" + window.fw_str + " ready");
 }
 
 function assertInt64Identity() {
@@ -150,8 +107,6 @@ async function bootPrepare() {
         throw new Error("window.p missing");
     nogcHard.p = p;
     assertInt64Identity();
-
-    await settleBeforePrepare();
 
     stage("prepare()");
     logLine("prepare() enter");
@@ -326,12 +281,10 @@ async function main() {
         return;
     }
 
-    document.getElementById("buildTag").textContent = "Build " + BUILD() + " (menu lite)";
-    logLine("menu boot build=" + BUILD());
+    logLine("menu boot build=" + BUILD() + " (scripts preloaded)");
 
-    await bootWebKit();
-    await loadChainScripts();
     await preflight();
+    await bootWebKit();
     await bootPrepare();
 
     stage("Checking elfldr on 127.0.0.1:9021…");

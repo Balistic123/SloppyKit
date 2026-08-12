@@ -637,9 +637,9 @@ async function probeAlreadyJailbroken() {
 }
 
 async function enterSenderOnlyMode(reason) {
-    flushMark("P2JB-SENDER-REDIRECT", clean(reason || "detected"));
-    location.replace("menu.html?b=" + encodeURIComponent(BUILD())
-        + "&go=1&attempts=24");
+    flushMark("P2JB-SENDER-INPAGE", clean(reason || "detected"));
+    stage("payload manager ready — pick a payload below", "ok");
+    showPayloadMenu();
 }
 
 function setPayloadTileState(tile, state) {

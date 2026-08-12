@@ -51,11 +51,33 @@
         imports: {
             "./core.js": "./core.js?b=" + B,
             "./mem.js": "./mem.js?b=" + B,
+            "./int64.js": "./int64.js?b=" + B,
             "./menu-boot.js": "./menu-boot.js?b=" + B
         }
     });
+    document.getElementById("buildTag").textContent = "Build " + B + " (menu lite)";
 })();
 </script>
-<script type="module">import "./menu-boot.js";</script>
+<script src="rop.js"></script>
+<script>
+document.write('<script src="prepare-only.js?b='
+    + encodeURIComponent(window.P2JB_BUILD || "dev") + '"><\/script>');
+</script>
+<script>window.offsetsReady = new Promise(function (res, rej) {
+    var s = document.querySelector('script[src^="../offsets/"]');
+    if (!s) return rej(new Error("offsets script was never injected by prepare-only.js"));
+    if (typeof OFFSET_wk_vtable_first_element !== "undefined") return res(s.src);
+    s.addEventListener("load", function () { res(s.src); });
+    s.addEventListener("error", function () {
+        rej(new Error("offsets 404: " + s.src));
+    });
+});
+</script>
+<script src="syscalls.js"></script>
+<script type="module">
+import { int64 } from "./int64.js";
+globalThis.int64 = int64;
+import "./menu-boot.js";
+</script>
 </body>
 </html>
