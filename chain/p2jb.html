@@ -117,8 +117,6 @@
   #dt:focus { outline: 3px solid #ebcb8b; }
   body.quiet #dt { color: #61708a; }
 
-  body.quiet h1,
-  body.quiet .sub,
   body.quiet #cfg,
   body.quiet #summary,
   body.quiet #tally,
@@ -127,9 +125,21 @@
   body.quiet #vitals,
   body.quiet #verdict,
   body.quiet #danger,
-  body.quiet #stage,
   body.quiet td.d .pu,
   body.quiet td.d .ev                     { display: none; }
+
+  /* Keep #stage visible so boot failures are not hidden behind UNLUCKY only */
+  body.quiet #stage.bad {
+    display: block !important;
+    font-size: 20px;
+    max-width: 92vw;
+    text-align: center;
+    white-space: pre-wrap;
+    line-height: 1.35;
+  }
+  body.quiet #scr.has-error {
+    display: block !important;
+  }
 
   body.quiet #reboot { font-size: 26px; }
 
@@ -182,7 +192,7 @@
 </style>
 </head>
 <body class="quiet">
-<div id="failureMessage">UNLUCKY &mdash; YOU NEED TO REBOOT</div>
+<div id="failureMessage">FAILED — see message below</div>
 <div id="cat">
   <img id="catImage" src="cat.jpg" alt="">
 </div>
@@ -322,6 +332,7 @@ const cfg = {
 };
 
 let elfldrSpawned = false;
+let senderOnly = false;
 const screenLines = [];
 
 const SCREEN_LINES = 22;
@@ -478,6 +489,7 @@ let payloadSenderBlocked = "";
 function showPayloadMenu() {
     navEl.textContent = "";
     navEl.style.display = "none";
+    document.body.classList.add("loader-ready");
     payloadMenuEl.className = "on";
     const title = payloadMenuEl.getElementsByClassName("menuTitle")[0];
     if (title && !title.getAttribute("src"))
@@ -489,6 +501,53 @@ function showPayloadMenu() {
             image.setAttribute("src", image.getAttribute("data-src"));
     }
     if (tiles.length) try { tiles[0].focus(); } catch (e) { }
+}
+
+async function probeExistingElfldr() {
+    if (!P || !chain)
+        return false;
+    preparePayloadSender();
+    const sock = await sys(SYS_SOCKET, 2, 1, 0);
+    if (sock.failed || sock.s32 < 0)
+        return false;
+    const fd = sock.s32;
+    let reachable = false;
+    try {
+        const conn = await sys(SYS_CONNECT, fd, payloadSockaddrStore.ptr, 0x10);
+        reachable = !conn.failed && conn.s32 === 0;
+        if (!reachable) {
+            // Port may be bound but not accepting yet; treat EADDRINUSE-style bind as present.
+            const sock2 = await sys(SYS_SOCKET, 2, 1, 0);
+            if (!sock2.failed && sock2.s32 >= 0) {
+                const bindRes = await sys(SYS_BIND, sock2.s32,
+                    payloadSockaddrStore.ptr, 0x10);
+                await sys(SYS_CLOSE, sock2.s32);
+                reachable = bindRes.failed || bindRes.s32 < 0;
+            }
+        }
+    } finally {
+        await sys(SYS_CLOSE, fd);
+    }
+    return reachable;
+}
+
+async function probeAlreadyJailbroken() {
+    if (!P || !chain)
+        return { ready: false, reason: "no-chain" };
+    if (await probeExistingElfldr())
+        return { ready: true, reason: "elfldr-9021" };
+    return { ready: false, reason: "needs-kernel-chain" };
+}
+
+async function enterSenderOnlyMode(reason) {
+    senderOnly = true;
+    elfldrSpawned = true;
+    clearFailureBanners();
+    setCatResult(true);
+    stage("Already jailbroken — opening payload manager", "ok");
+    flushMark("P2JB-SENDER-ONLY", clean(reason || "detected"));
+    showPayloadMenu();
+    showVerdict(false, "Payload manager ready.\nNo reboot required.");
 }
 
 function setPayloadTileState(tile, state) {
@@ -701,10 +760,24 @@ async function sendPayloadInPlace(name, tile) {
 }
 
 function stage(text, cls) {
-    if (cls === "bad") setCatResult(false);
+    if (cls === "bad") {
+        setCatResult(false);
+        const fm = document.getElementById("failureMessage");
+        if (fm) {
+            const short = String(text).replace(/\s+/g, " ").trim().slice(0, 220);
+            fm.textContent = short.toLowerCase().includes("reboot")
+                ? short
+                : ("FAILED — " + short);
+        }
+        scrEl.className = "has-error";
+        screenLine(shortError(text));
+    }
     if (elfldrSpawned && cls === "bad") return;
     stageEl.textContent = text;
     stageEl.className = cls || "";
+}
+function shortError(text) {
+    return String(text).replace(/\s+/g, " ").trim().slice(0, 400);
 }
 function danger(text) {
     if (elfldrSpawned) return;
@@ -1605,6 +1678,20 @@ async function main() {
     try {
         await bootChain();
 
+        const jb = await probeAlreadyJailbroken();
+        flushMark("P2JB-DETECT", "ready=" + (jb.ready ? 1 : 0)
+            + "-reason=" + (jb.reason || "none"));
+        if (jb.ready) {
+            await enterSenderOnlyMode(jb.reason);
+            return;
+        }
+        if (Q.get("menu") === "1") {
+            stage("payload manager not found on 127.0.0.1:9021 — run the full "
+                + "chain first or start elfldr on the console", "bad");
+            flushMark("P2JB-MENU-MISS", "elfldr-not-on-9021");
+            return;
+        }
+
         await chooseCore();
 
         makeContext();
@@ -1709,73 +1796,33 @@ function lastRunText() {
 
 (async function entry() {
 
-    screenLine("slopkit -- reading the one-shot safety latch");
+    screenLine("p2jb webkit — starting");
 
-    if (CLEARLATCH) {
+    if (CLEARLATCH && !ARMED) {
         renderNav("", false);
         await clearMain();
         return;
     }
 
-    stage("checking the one-shot safety latch");
-    const l = await latch.read();
-    flushMark("LATCH-READ", "set=" + (l.set ? 1 : 0)
-        + "-detail=" + clean(l.detail || ""));
-
-    // ?auto=1 clears the latch instead of asking; reboot between runs
-    if (l.set && AUTOCLEAR) {
-        flushMark("LATCH-AUTOCLEAR", clean(l.detail || ""));
+    // Fresh armed runs always reset tab-local state; no reboot required.
+    if (ARMED) {
+        storeDel(PROGRESS_KEY);
+        storeDel(RUNLOG_KEY);
         await latch.clear();
-        stage("latch was set and ?auto=1 cleared it, set by: "
-            + (l.detail || "(no detail)")
-            + "\nassumes the console has been rebooted since that run.");
-        l.set = false;
-    }
-
-    if (l.set) {
-        renderNav(STALLED_AT, true);
-        stage("the one-shot latch is set, by: " + (l.detail || "(no detail)")
-            + "\n\nre-arming is only safe after a run that failed in the " + "prologue: setuid(1) is irreversible for the boot and the trigger " + "needs a fresh singly-referenced cred");
-        summaryEl.textContent = lastRunText();
-        flushMark("POOPS-LATCHED", clean(l.detail || ""));
-        return;
+        if (CLEARLATCH)
+            flushMark("LATCH-CLEARED-INLINE", "clear=1-with-go=1");
     }
 
     if (!ARMED) {
         document.getElementById("arm").hidden = false;
         renderNav(STALLED_AT, false);
-        stage("not armed" + (STALLED_AT ? " -- and the last run stopped at '"
+        stage("not armed" + (STALLED_AT ? " -- last run stopped at '"
             + STALLED_AT + "'" : ""));
-        vitals(vitalsText("if armed with ?go=1 this page will open "));
-
-        if (cfg.trigger !== "none"
-            && !(cfg.trigger === "overflow" && cfg.burn !== "full")) {
-            showVerdict(true, "this selection will leave the console needing A " + "REBOOT.\n");
-            navEl.textContent = "";
-            link("?go=1&trigger=" + cfg.trigger
-                + (cfg.trigger === "overflow" ? "&burn=" + cfg.burn : ""),
-                "ARM  " + cfg.trigger.toUpperCase()
-                + (cfg.trigger === "overflow" ? " / BURN=" + cfg.burn : "")
-                + "  -- I accept that this console will need A REBOOT",
-                "one hot");
-
-            link("?trigger=none", "no -- go back to the negative control",
-                "extra");
-            link("../index.html", "back to menu", "extra");
-        }
-        summaryEl.textContent = lastRunText()
-            + "\n\nSAME-process re-arm checks, and their limit stated honestly: " + "this page records the first socket fd it is given and the " + "process's uid, and can therefore notice that THIS WebProcess has " + "already run";
-        flushMark("P2JB-IDLE", "rev=" + REV + "-armed=0-trigger=" + cfg.trigger);
-        return;
-    }
-
-    if (STALLED_AT && !FROM && !ONLY.length) {
-
-        renderNav(STALLED_AT, false);
-        stage("the last run stopped at '" + STALLED_AT + "' but the latch is "
-            + "clear, so pick a row explicitly", "bad");
+        link("?go=1&auto=1&trigger=overflow&burn=full&payload=1",
+            "START JAILBREAK", "one hot");
+        link("../index.html", "back to menu", "extra");
         summaryEl.textContent = lastRunText();
-        flushMark("POOPS-STALLED", STALLED_AT);
+        flushMark("P2JB-IDLE", "rev=" + REV + "-armed=0-trigger=" + cfg.trigger);
         return;
     }
 
@@ -1783,7 +1830,7 @@ function lastRunText() {
     main().catch(err => {
         const m = (err && err.message) || String(err);
         stage("boot failed: " + m, "bad");
-        flushMark("POOPS-FAILED", (err && err.name) + ":" + m.slice(0, 160));
+        flushMark("P2JB-FAILED", (err && err.name) + ":" + m.slice(0, 160));
         runInFlight = false;
         lockNav(false);
     });

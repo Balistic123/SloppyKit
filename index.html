@@ -75,17 +75,17 @@
 <div id="wrap">
   <img id="cat" src="chain/cat.jpg" alt="">
   <h1>P2JB WebKit</h1>
-  <p class="tagline">Browser jailbreak for PS5 9.00–12.70 via Slopkit userland and the P2JB kernel chain (~50 min leak).</p>
+  <p class="tagline">Opens the payload manager if you're already jailbroken. Otherwise runs the full P2JB WebKit chain (~50 min). No reboot needed to reopen the menu.</p>
   <div id="actions">
     <a id="start" class="action"
        href="chain/p2jb.html?go=1&amp;auto=1&amp;trigger=overflow&amp;burn=full&amp;payload=1"
-       tabindex="0">START JAILBREAK</a>
+       tabindex="0">OPEN / JAILBREAK</a>
     <a class="action secondary"
-       href="chain/p2jb.html?trigger=none"
-       tabindex="0">Diagnostics (no trigger)</a>
+       href="chain/p2jb.html?go=1&amp;menu=1"
+       tabindex="0">Payload menu only (skip kernel)</a>
   </div>
   <div id="status"></div>
-  <div id="warn">One run per boot. Keep this page open through the leak. Ethernet recommended on 12.xx.</div>
+  <div id="warn">Already jailbroken? This detects elfldr on :9021 and opens the payload menu. Full jailbreak only runs if needed.</div>
 </div>
 
 <script>try {

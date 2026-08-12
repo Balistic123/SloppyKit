@@ -26,7 +26,7 @@ const OFFSET_lk_pthread_create                 = 0x00021150;
 const OFFSET_lk_getpid                         = 0x0001B7F0;
 const OFFSET_lk__thread_list                   = 0x00064218;
 const OFFSET_lk_worker_wait_return             = 0x0001FC71;
-const OFFSET_lk_sleep                          = 0x00027E70;
+const OFFSET_lk_sleep                          = 0x00027E90;
 const OFFSET_lk_sceKernelGetCurrentCpu         = 0x00001200;
 
 const OFFSET_lc_memset                         = 0x00015BF0;
