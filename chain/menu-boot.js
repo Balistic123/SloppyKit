@@ -5,7 +5,8 @@ import { int64 } from "./int64.js";
 const Q = new URLSearchParams(location.search);
 const ARMED = Q.get("go") === "1";
 const BUILD = () => window.P2JB_BUILD || "dev";
-const MAX_ATTEMPTS = 1;
+const MAX_ATTEMPTS = Math.max(1, Math.min(48,
+    parseInt(Q.get("attempts") || "24", 10)));
 
 const PAYLOADS = [
     { name: "ftpsrv-ps5.elf", label: "FTP Server" },
@@ -106,7 +107,7 @@ async function bootWebKit() {
         return;
     }
 
-    stage("WebKit (1 attempt)");
+    stage("WebKit (~1 in 3 placement, up to " + MAX_ATTEMPTS + " tries)");
     try { history.replaceState(null, ""); } catch (e) { }
     if (typeof globalThis.gc === "function") {
         try { globalThis.gc(); } catch (e) { }
