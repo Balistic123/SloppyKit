@@ -1298,15 +1298,29 @@ export function releaseFakeCell() {
     referenceTarget = null;
     keepAlive = null;
 
-    // The serialized exploit graph otherwise remains owned by the current
-    // history entry after all JavaScript bindings are dropped.  It is no
-    // longer needed once mem.js has promoted the primitive to the real-cell
-    // pair, and retaining it can push the PS5 WebProcess over its heap limit
-    // when the kernel stages begin allocating their worker/ROP arenas.
+    // Drop every remaining binding from the WebKit stage so prepare()'s ROP
+    // stack can allocate — partial release was causing prepare()-time OOM.
+    rwBuffer = null;
+    rwView = null;
+    rwMirror = null;
+    targetBuffer = null;
+    targetView = null;
+    anchorElement = null;
+    markerObjectA = null;
+    markerObjectB = null;
+    targetHolder = null;
+    holderGuardA = null;
+    holderGuardB = null;
+    nativeTarget = null;
+
     try {
         history.replaceState(null, "");
         report.historyCleared = history.state === null;
     } catch (_) { }
+
+    if (typeof globalThis.gc === "function") {
+        try { globalThis.gc(); } catch (_) { }
+    }
 
     fakeReleased = true;
     stopped = true;

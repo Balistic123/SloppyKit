@@ -343,17 +343,6 @@ function buildPairCarrier(fake) {
 
         windowBytes: WORKER_BUFFER_SIZE,
 
-        holder: fake.holder,
-        holderAddress: fake.holderAddress,
-        leakSlotOffset: fake.leakSlotOffset,
-        leakSlotAddress: fake.leakSlotAddress,
-        setLeakSlot: fake.setLeakSlot,
-        clearLeakSlot: fake.clearLeakSlot,
-        anchorObject: fake.anchorObject,
-        anchorObjectAddress: fake.anchorObjectAddress,
-        textarea: fake.textarea,
-        textareaAddress: fake.textareaAddress,
-
         profile: fake.profile,
         attempts: fake.attempts,
         validate,

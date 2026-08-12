@@ -338,10 +338,14 @@ async function prepare(p, opts = {}) {
     let original_context = malloc(0x40);
 
     let return_address_ptr;
-    if (typeof OFFSET_lk_worker_wait_return !== "undefined") {
+    if (opts.menu && typeof OFFSET_WORKER_STACK_OFFSET !== "undefined") {
+        return_address_ptr = worker_stack.add32(OFFSET_WORKER_STACK_OFFSET);
+        jbmark("PREP-WORKER-RET-MENU", "off=0x"
+            + OFFSET_WORKER_STACK_OFFSET.toString(16)
+            + "-ptr=0x" + return_address_ptr.toString());
+    } else if (typeof OFFSET_lk_worker_wait_return !== "undefined") {
         return_address_ptr = await find_worker_return_slot(p, worker_stack, libKernelBase);
     } else {
-        // Backward-compatible path for original profiles without a saved-PC fingerprint.
         return_address_ptr = worker_stack.add32(OFFSET_WORKER_STACK_OFFSET);
     }
     let original_return_address = p.read8(return_address_ptr);

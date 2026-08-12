@@ -97,7 +97,7 @@
     document.getElementById("buildId").textContent = "Build " + B;
     start.href = "chain/p2jb.html?b=" + B
         + "&go=1&auto=1&trigger=overflow&burn=full&payload=1&sockets=48&attempts=64";
-    menu.href = "chain/menu.html?b=" + B + "&go=1&attempts=12";
+    menu.href = "chain/menu.html?b=" + B + "&go=1";
     var m = /PlayStation 5\/(\d+)\.(\d+)/.exec(navigator.userAgent);
     if (m) {
         status.textContent = "Detected firmware " + m[1] + "." + m[2] + ".";
