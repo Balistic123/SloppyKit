@@ -343,6 +343,11 @@ function buildPairCarrier(fake) {
 
         windowBytes: WORKER_BUFFER_SIZE,
 
+        leakSlotOffset: fake.leakSlotOffset,
+        leakSlotAddress: fake.leakSlotAddress,
+        setLeakSlot: fake.setLeakSlot.bind(fake),
+        clearLeakSlot: fake.clearLeakSlot.bind(fake),
+
         profile: fake.profile,
         attempts: fake.attempts,
         validate,

