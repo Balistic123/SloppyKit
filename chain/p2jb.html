@@ -231,10 +231,10 @@
 </div>
 <div id="homeActions">
   <a class="primary" id="homeOpen"
-     href="?v=5&amp;go=1&amp;auto=1&amp;trigger=overflow&amp;burn=full&amp;payload=1"
+     href="?v=6&amp;go=1&amp;auto=1&amp;trigger=overflow&amp;burn=full&amp;payload=1"
      tabindex="0">OPEN / JAILBREAK</a>
   <a class="secondary" id="homeMenu"
-     href="?v=5&amp;go=1&amp;menu=1"
+     href="?v=6&amp;go=1&amp;menu=1"
      tabindex="0">PAYLOAD MENU ONLY</a>
 </div>
 <div id="nav"></div>
@@ -264,8 +264,8 @@
 </script>
 <script src="syscalls.js"></script>
 
-<script type="module">import { establishPrimitive, fakeCellReleased } from "./core.js?v=11";
-import { installWindowP, pairStatus } from "./mem.js?v=11";
+<script type="module">import { establishPrimitive, fakeCellReleased } from "./core.js";
+import { installWindowP, pairStatus } from "./mem.js";
 import { int64 } from "./int64.js";
 
 // p2jb-kernel.js is ~10k lines — defer until the full kernel chain is required.
@@ -1654,7 +1654,7 @@ async function bootPrimitiveAndChain() {
         flushMark("PRIMITIVE-HISTORY-PURGED", "settled-ms=750");
 
         const carrier = await establishPrimitive({
-            maxAttempts: MAX_ATTEMPTS,
+            maxAttempts: MAX_ATTEMPTS || cfg.attempts,
             onEvent(tag, detail, attempt) {
                 if (tag === "ATTEMPT-START") {
                     // This is before the large graph is built, so make the
