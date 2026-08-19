@@ -8,6 +8,12 @@
 <script>window.__BRAND="Poopsploit";try{document.title="Poopsploit";}catch(e){}</script>
 
 <script>(function () {
+    var host = String(location.hostname || "");
+    if (/\.github\.io$/i.test(host) || /\.pages\.dev$/i.test(host)
+        || location.protocol === "file:") {
+        window.__earlyBeaconOff = true;
+        window.__beaconOff = true;
+    }
     var pending = [];
     window.__jbEarly = pending;
     function raw(tag, text) {
