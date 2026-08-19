@@ -2054,6 +2054,20 @@ async function bootPrimitiveAndChain() {
         if (!pairStatus.promoted)
             throw new Error("the (main, worker) pair was NOT promoted ("
                 + pairStatus.error + ")");
+        // Status UI only AFTER the pair is up — DOM churn before/during the groom
+        // breaks addrof (see entry() note: "rushing main() left it NaN").
+        try {
+            var boot = document.getElementById("livestat");
+            if (!boot) {
+                boot = document.createElement("pre");
+                boot.id = "livestat";
+                var cat0 = document.getElementById("cat");
+                if (cat0 && cat0.parentNode) cat0.parentNode.insertBefore(boot, cat0.nextSibling);
+                else document.body.appendChild(boot);
+            }
+            boot.textContent = "Primitive OK — loading P2JB kernel stage\n"
+                + "(leak ~30-50 min on 12.40, do not power off)";
+        } catch (e) { }
     }
 
     const p = globalThis.p;
@@ -2088,13 +2102,6 @@ async function bootPrimitiveAndChain() {
 }
 
 async function main() {
-    try {
-        var boot = document.createElement("pre");
-        boot.id = "livestat";
-        boot.textContent = "Starting P2JB...\nWebKit primitive, then kernel leak (~30-50 min on 12.40)";
-        var cat0 = document.getElementById("cat");
-        if (cat0 && cat0.parentNode) cat0.parentNode.insertBefore(boot, cat0.nextSibling);
-    } catch (e) { }
     flushMark("POOPS-BOOT", "rev=" + REV + "-trigger=" + cfg.trigger
         + "-burn=" + cfg.burn + "-sockets=" + cfg.sockets
         + "-attempts=" + cfg.attempts + "-from=" + (FROM || "none")
