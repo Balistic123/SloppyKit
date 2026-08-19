@@ -119,10 +119,10 @@ body{
 /* Bump this block on every deploy. index shows site + per-exploit build ids; buttons
    get the right ?v= automatically (PS5 has no address bar to verify cache busting). */
 var BUILD = {
-    site: "132",
-    p2jb: "130",
-    poops: "130",
-    note: "fix mem/core module version mismatch (NaN pair)"
+    site: "133",
+    p2jb: "127",
+    poops: "127",
+    note: "revert stage() DOM churn during quiet boot (NaN pair)"
 };
 
 (function applyBuild() {

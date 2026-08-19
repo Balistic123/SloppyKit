@@ -1,0 +1,27 @@
+GitHub Pages needs an EMPTY file named exactly:
+
+    .nojekyll
+
+(at the repo root, next to index.html)
+
+Windows hides dotfiles, so this visible copy exists for upload workflows
+that refuse ".nojekyll".
+
+EASIEST — create it on github.com (no upload needed):
+  1. Open your repo on GitHub
+  2. Add file → Create new file
+  3. Name the file:  .nojekyll
+  4. Leave the file empty → Commit
+
+OR — rename this file on GitHub after upload:
+  1. Upload THIS file (dot-nojekyll.upload-me) any way you normally deploy
+  2. On GitHub: open the file → ... → Rename → change to  .nojekyll
+  3. Delete the old name if duplicate
+
+OR — from PowerShell in this folder:
+  Copy-Item dot-nojekyll.upload-me .nojekyll -Force
+  git add -f .nojekyll
+  git commit -m "Add .nojekyll for GitHub Pages"
+  git push
+
+Without .nojekyll, GitHub runs Jekyll and can drop or break static exploit files.
