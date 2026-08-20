@@ -2096,7 +2096,7 @@ async function main() {
                 await loadScript("rop-worker.js?v=127");   // sync syscall executor (fireSync)
                 await loadScript("p2jb_lk.js?v=127");       // per-fw libkernel_web offsets for rop-worker
                 await loadScript("p2jb_poops.js?v=127");    // Y2JB adapter (sync syscall via rop-worker)
-                await loadScript("p2jb.js?v=132");          // exploit module (unchanged, sync)
+                await loadScript("p2jb.js?v=133");          // exploit module (unchanged, sync)
                 flushMark("P2JB-LOADED", "adapter+module on poopsploit primitives");
             } catch (e) {
                 /* This reported ONLY through flushMark. Served from a static host there is no

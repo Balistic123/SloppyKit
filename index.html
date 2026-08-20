@@ -119,10 +119,10 @@ body{
 /* Bump this block on every deploy. index shows site + per-exploit build ids; buttons
    get the right ?v= automatically (PS5 has no address bar to verify cache busting). */
 var BUILD = {
-    site: "138",
-    p2jb: "132",
+    site: "139",
+    p2jb: "133",
     poops: "127",
-    note: "FAST35: 5-core + pinned feed + 16384 unroll (~38 min target)"
+    note: "FAST 4-core + pinned feed (~45 min); no 5-core prefill (OOM fix)"
 };
 
 (function applyBuild() {
@@ -141,7 +141,8 @@ var BUILD = {
 
 /* P2JB diagnostic query flags (append manually when testing):
    &preflight=1&skipleak=1  ~2 min, no leak — offset/spawn check
-   &cores=4               matem6 4-core plan (~50 min, if fast35 panics)
+   &cores=5               experimental 5-core (~38 min; may OOM)
+   &cores=4               matem6 conservative (~50 min)
    &pf=1                  legacy 4096 unroll
    &skipleak=1              stop before stage0
    &clear=1                 clear one-shot latch after a bad run
