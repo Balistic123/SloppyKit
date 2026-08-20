@@ -119,10 +119,10 @@ body{
 /* Bump this block on every deploy. index shows site + per-exploit build ids; buttons
    get the right ?v= automatically (PS5 has no address bar to verify cache busting). */
 var BUILD = {
-    site: "136",
-    p2jb: "130",
+    site: "137",
+    p2jb: "131",
     poops: "127",
-    note: "MAX leak: 4-core burst prefill + 32768 unroll (?pf=1 legacy feed)"
+    note: "fix WebKit hang: feed loop + 16384 unroll (not sync burst)"
 };
 
 (function applyBuild() {
@@ -141,7 +141,8 @@ var BUILD = {
 
 /* P2JB diagnostic query flags (append manually when testing):
    &preflight=1&skipleak=1  ~2 min, no leak — offset/spawn check
-   &pf=1                  legacy live pipe-feed loop (~50 min, for debugging)
+   &pf=1                  legacy 4096 unroll (~50 min)
+   &pp=1                  experimental burst (may hang WebKit)
    &skipleak=1              stop before stage0
    &clear=1                 clear one-shot latch after a bad run
    &spawn=thr_new           raw thr_new instead of scePthreadCreate
