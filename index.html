@@ -119,10 +119,10 @@ body{
 /* Bump this block on every deploy. index shows site + per-exploit build ids; buttons
    get the right ?v= automatically (PS5 has no address bar to verify cache busting). */
 var BUILD = {
-    site: "135",
-    p2jb: "129",
+    site: "136",
+    p2jb: "130",
     poops: "127",
-    note: "turbo leak: max cores + pin feed + 16384 unroll (?safe=1 reverts)"
+    note: "MAX leak: 4-core burst prefill + 32768 unroll (?pf=1 legacy feed)"
 };
 
 (function applyBuild() {
@@ -141,7 +141,7 @@ var BUILD = {
 
 /* P2JB diagnostic query flags (append manually when testing):
    &preflight=1&skipleak=1  ~2 min, no leak — offset/spawn check
-   &safe=1                 conservative ~50 min plan (one free core, 8192 unroll)
+   &pf=1                  legacy live pipe-feed loop (~50 min, for debugging)
    &skipleak=1              stop before stage0
    &clear=1                 clear one-shot latch after a bad run
    &spawn=thr_new           raw thr_new instead of scePthreadCreate
