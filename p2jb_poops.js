@@ -113,6 +113,12 @@
         get pop_r8()           { return gad["pop r8"]; },
         get ret()              { return gad["ret"]; },
         get mov_qword_rdi_rax(){ return gad["mov [rdi], rax"]; },
+        get mov_rax_indir()      { return gad["mov rax, [rax]"]; },
+        get cmp_rcx_eax()        { return gad["cmp [rcx], eax"]; },
+        get sete_al()            { return gad["sete al"]; },
+        get shl_rax_3()          { return gad["shl rax, 3"]; },
+        get add_rax_rcx()        { return gad["add rax, rcx"]; },
+        get inc_dword_rax()      { return gad["inc dword [rax]"]; },
         // generic syscall trampoline (number in rax): prefer a resolved wrapper,
         // else the syscall stub table's shared `syscall; ret`. Poops exposes
         // per-nr stubs; the wrapper address is the syscall instruction itself.

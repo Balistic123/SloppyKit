@@ -796,9 +796,14 @@ window.liveStatus = (function () {
     // leak+drain are the 2^32 kqueueex grind: the drain is the ~14.5% of those calls still
     // buffered in the pipes when the feed loop finishes, which is why it gets its own slice
     // rather than being hidden behind a 100% bar.
-    var W = { setup: 120, leak: 2280, drain: 180, topup: 90, burn: 60, preburn: 15, race: 300 };
+    var W = { setup: 120, leak: 2400, drain: 300, topup: 60, burn: 60, preburn: 15, race: 300 };
     var ORDER = ["setup", "leak", "drain", "topup", "burn", "preburn", "race"];
-    var TOTAL = 0; for (var q = 0; q < ORDER.length; q++) TOTAL += W[ORDER[q]];
+    var TOTAL = 0;
+    function recomputeTotal() {
+        TOTAL = 0;
+        for (var q = 0; q < ORDER.length; q++) TOTAL += W[ORDER[q]];
+    }
+    recomputeTotal();
 
     function hms(s) {
         if (!isFinite(s) || s < 0) s = 0;
@@ -870,10 +875,10 @@ window.liveStatus = (function () {
                 bar = "\n" + meter(pct / 100, 40) + " " + pct.toFixed(2) + "%";
                 if (pct >= 99.999) {
                     bar += "   COMPLETE";
-                } else if (rate && rate > 0) {
-                    var eta = Math.round((100 - pct) / rate);
+                } else if (rate && rate > 0.0001) {
+                    var etaSec = Math.round((100 - pct) / rate);
                     bar += "   " + (rate * 60).toFixed(2) + "%/min"
-                        + "   ETA " + hms(eta) + "   done ~" + clock(now + eta * 1000);
+                        + "   ETA " + hms(etaSec) + "   done ~" + clock(now + etaSec * 1000);
                 } else {
                     bar += "   ETA --:--:--";
                 }
@@ -908,7 +913,7 @@ window.liveStatus = (function () {
         } catch (e) { }
     }
 
-    return function (text, pct, phase) {
+    function api(text, pct, phase) {
         var now = Date.now();
         try {
             ensureEl();
@@ -922,8 +927,8 @@ window.liveStatus = (function () {
                 samples.push({ t: now, p: curPct });
                 while (samples.length > 2 && now - samples[0].t > WIN_MS) samples.shift();
                 var first = samples[0], span = now - first.t, gain = curPct - first.p;
-                if (span >= MIN_SPAN_MS && gain > 0) rate = gain / (span / 1000);
-                if (lastP === null || curPct > lastP) { lastP = curPct; lastMove = now; }
+                if (span >= MIN_SPAN_MS && gain > 0.001) rate = gain / (span / 1000);
+                if (lastP === null || curPct > lastP + 0.001) { lastP = curPct; lastMove = now; }
             }
             // Start the repaint timer only once a real phase is running. Before that the
             // heap groom is in progress and periodic DOM writes are not worth the risk.
@@ -940,7 +945,21 @@ window.liveStatus = (function () {
                     + (rate ? " rate=" + (rate * 60).toFixed(2) + "%/min" : ""));
             }
         } catch (e) { }
+    }
+    api.configure = function (cfg) {
+        if (!cfg || typeof cfg !== "object") return;
+        if (typeof cfg.leakSec === "number" && cfg.leakSec > 60)
+            W.leak = Math.round(cfg.leakSec);
+        if (typeof cfg.drainSec === "number" && cfg.drainSec > 30)
+            W.drain = Math.round(cfg.drainSec);
+        else if (typeof cfg.leakSec === "number")
+            W.drain = Math.max(120, Math.round(cfg.leakSec * 0.08));
+        if (typeof cfg.setupSec === "number" && cfg.setupSec > 30)
+            W.setup = Math.round(cfg.setupSec);
+        recomputeTotal();
+        overallMax = 0;
     };
+    return api;
 })();
 
 // Guaranteed-synchronous beacon: blocks until delivered, bypasses raceMode/queue.
@@ -2096,7 +2115,7 @@ async function main() {
                 await loadScript("rop-worker.js?v=127");   // sync syscall executor (fireSync)
                 await loadScript("p2jb_lk.js?v=127");       // per-fw libkernel_web offsets for rop-worker
                 await loadScript("p2jb_poops.js?v=127");    // Y2JB adapter (sync syscall via rop-worker)
-                await loadScript("p2jb.js?v=133");          // exploit module (unchanged, sync)
+                await loadScript("p2jb.js?v=136");          // exploit module (unchanged, sync)
                 flushMark("P2JB-LOADED", "adapter+module on poopsploit primitives");
             } catch (e) {
                 /* This reported ONLY through flushMark. Served from a static host there is no
