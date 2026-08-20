@@ -119,10 +119,10 @@ body{
 /* Bump this block on every deploy. index shows site + per-exploit build ids; buttons
    get the right ?v= automatically (PS5 has no address bar to verify cache busting). */
 var BUILD = {
-    site: "142",
-    p2jb: "136",
+    site: "143",
+    p2jb: "137",
     poops: "127",
-    note: "P2JB-2 autonomous leak (default); ?legacy=1 for pipe path"
+    note: "P2JB-2 memsafe 8192/4-core (~38 min); ?turbo=1 if RAM OK"
 };
 
 (function applyBuild() {
@@ -141,8 +141,8 @@ var BUILD = {
 
 /* P2JB diagnostic query flags (append manually when testing):
    &preflight=1&skipleak=1  ~2 min, no leak — offset/spawn check
-   &legacy=1              matem6 pipe-gated leak (~50 min)
-   &cores=5               p2jb2 five workers @8192 unroll
+   &turbo=1              16384 unroll (faster, may OOM)
+   &legacy=1              pipe leak (~50 min, lowest memory)
    &skipleak=1              stop before stage0
    &clear=1                 clear one-shot latch after a bad run
    &spawn=thr_new           raw thr_new instead of scePthreadCreate
