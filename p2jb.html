@@ -796,7 +796,7 @@ window.liveStatus = (function () {
     // leak+drain are the 2^32 kqueueex grind: the drain is the ~14.5% of those calls still
     // buffered in the pipes when the feed loop finishes, which is why it gets its own slice
     // rather than being hidden behind a 100% bar.
-    var W = { setup: 120, leak: 2280, drain: 120, topup: 115, burn: 60, preburn: 15, race: 300 };
+    var W = { setup: 120, leak: 2280, drain: 180, topup: 90, burn: 60, preburn: 15, race: 300 };
     var ORDER = ["setup", "leak", "drain", "topup", "burn", "preburn", "race"];
     var TOTAL = 0; for (var q = 0; q < ORDER.length; q++) TOTAL += W[ORDER[q]];
 
@@ -2096,7 +2096,7 @@ async function main() {
                 await loadScript("rop-worker.js?v=127");   // sync syscall executor (fireSync)
                 await loadScript("p2jb_lk.js?v=127");       // per-fw libkernel_web offsets for rop-worker
                 await loadScript("p2jb_poops.js?v=127");    // Y2JB adapter (sync syscall via rop-worker)
-                await loadScript("p2jb.js?v=131");          // exploit module (unchanged, sync)
+                await loadScript("p2jb.js?v=132");          // exploit module (unchanged, sync)
                 flushMark("P2JB-LOADED", "adapter+module on poopsploit primitives");
             } catch (e) {
                 /* This reported ONLY through flushMark. Served from a static host there is no

